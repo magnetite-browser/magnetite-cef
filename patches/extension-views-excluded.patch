@@ -1,0 +1,29 @@
+--- a/libcef/browser/browser_info_manager.cc	2026-11-09 20:45:29
++++ b/libcef/browser/browser_info_manager.cc	2026-11-09 20:45:29
+@@ -26,6 +26,7 @@
+ #include "content/public/browser/web_ui.h"
+ #include "content/public/browser/web_ui_controller.h"
+ #include "content/public/common/url_constants.h"
++#include "extensions/browser/view_type_utils.h"
+ 
+ namespace {
+ 
+@@ -651,6 +652,18 @@
+     return true;
+   }
+ 
++  // Extension views (action popups, side panels, background pages and
++  // offscreen documents) are hosted by Chrome and never get a CefBrowser.
++  // Without this, their renderer waits kNewBrowserInfoResponseTimeoutMs.
++  const auto view_type = extensions::GetViewType(rfh);
++  if ((view_type == extensions::mojom::ViewType::kExtensionPopup ||
++       view_type == extensions::mojom::ViewType::kExtensionSidePanel ||
++       view_type == extensions::mojom::ViewType::kExtensionBackgroundPage ||
++       view_type == extensions::mojom::ViewType::kOffscreenDocument) &&
++      !CefBrowserHostBase::GetBrowserForHost(rfh)) {
++    return true;
++  }
++
+   return false;
+ }
+ 
