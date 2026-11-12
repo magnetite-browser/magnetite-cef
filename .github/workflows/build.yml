@@ -8,7 +8,7 @@ run-name: CEF ${{ inputs.cef_version }}
 # work is in tools/build-cef.sh.
 #
 # A job may run for six hours, and a build on GitHub's free Mac runners takes
-# about ten. So the build is a chain of jobs: each one builds for five hours,
+# about thirteen. So the build is a chain of jobs: each one builds for five hours,
 # packs the whole tree (sources, toolchains, the half-built out directory)
 # into an artifact, and the next job unpacks it and lets ninja carry on where
 # it stopped. The job that finishes makes the distribution; the jobs after it
@@ -45,12 +45,6 @@ env:
   # The Xcode to build with; when the image no longer has it, the image's
   # default Xcode is used.
   XCODE_VERSION: "26.5"
-  # depot_tools: the commit the CEF version's CHROMIUM_BUILD_COMPATIBILITY.txt
-  # names as depot_tools_checkout (automate-git.py leaves it to us with
-  # --no-depot-tools-update). For a version that names none, pick one on
-  # purpose (git ls-remote https://chromium.googlesource.com/chromium/tools/depot_tools.git main).
-  # The release notes record it.
-  DEPOT_TOOLS_COMMIT: 132599ebbd8d22d1b1bd5ea703a6d3bc493edd71
   # A job may run for 360 minutes. Building stops 300 minutes after the job
   # started, which leaves time to pack and upload the tree.
   BUILD_UNTIL_MINUTE: "300"

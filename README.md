@@ -22,15 +22,17 @@ the same version gets a revision, `156.0.15-2`), with:
 - `cef_binary_<version>_macosarm64_minimal.tar.bz2`: the minimal distribution
   for macOS on Apple silicon, laid out like the official one on CEF's CDN;
 - its SHA-256 (`.sha256`);
-- a provenance attestation signed by GitHub.
+- a provenance attestation signed by GitHub, when the workflow built it.
 
-The release notes list the build's GN args, the depot_tools commit, Xcode
-and the runner image.
+The release notes list the build's GN args, the depot_tools commit, Xcode,
+and where it was built: by the workflow (with the run) or on a machine of
+the maintainers.
 
 ### Checking a release
 
-The attestation shows which workflow built the archive, from which branch.
-Check both before Magnetite pins a new archive:
+For a release the workflow built, the attestation shows which workflow
+built the archive, from which branch. Check both before Magnetite pins a new
+archive:
 
 ```sh
 gh attestation verify <archive> --repo magnetite-browser/magnetite-cef \
@@ -42,12 +44,18 @@ The workflow builds and releases from `main` only; in the repository's
 settings, protect `main` (changes by reviewed pull request only) and turn on
 immutable releases, so a published archive cannot be replaced.
 
+A release built on a machine of the maintainers has no attestation: GitHub
+signs only what its workflows build. Its notes say so and name the commit
+it was built from. What can be checked is the SHA-256, which Magnetite pins,
+and the build itself, by building that commit again.
+
 ## Building a release
 
 Actions → Build CEF → Run workflow on `main`, with the full CEF version, as
 CEF names its archives (`156.0.15+gcf671c0+chromium-156.0.8078.80`).
 
-The build runs on GitHub's free Mac runners and takes about half a day. A job
+The build runs on GitHub's free Mac runners and takes about half a day
+(156.0.26 took 13 hours). A job
 may run for six hours, so the build is a chain of jobs: each one builds for
 five hours and hands its tree to the next. If a job fails (a lost runner, a
 network error), "Re-run failed jobs" carries on from the job before it.
@@ -71,7 +79,37 @@ was made, re-running the publish job finds the release and passes.
 
 Before building, it checks that GN resolved the codec args as intended.
 
-## A Mac of our own
+## Building on a machine of our own
+
+The same build without the workflow: one command, no time limit, and the
+tree stays, so a build that was interrupted carries on where it stopped.
+On a MacBook Pro with an M4 Pro (14 cores) it took under two hours: 17
+minutes to fetch, 87 to compile.
+
+It needs Xcode with its Metal toolchain (from Xcode 27 a download of its
+own: `xcodebuild -downloadComponent MetalToolchain`), about 120 GB of free
+disk and, to publish, `gh` signed in with write access to this repository.
+
+```sh
+export CEF_VERSION='156.0.26+g8ea0c73+chromium-156.0.8078.88'
+export CEF_WORK=/Volumes/Build/cef    # where to build; default ~/cef
+tools/build-cef.sh local              # fetch, build, make the distribution
+tools/build-cef.sh publish-local      # create the release
+```
+
+- `local` checks out CEF and Chromium into `CEF_WORK` (once), applies
+  `patches/`, builds and puts the archive into `CEF_WORK/cef-distrib`. It
+  refuses a tree of another CEF version or made with other patches: use
+  another `CEF_WORK` for those.
+- `publish-local` creates the release from that archive. It wants this
+  checkout to be `main` as it is on GitHub, with nothing changed, because
+  the release notes name the commit. Another build of a released version
+  needs a revision (`export CEF_REVISION=2`), as with the workflow.
+
+Build releases only on a machine you would trust with Magnetite's signing
+key: what it builds ends up in every Magnetite release.
+
+## A Mac of our own as a runner
 
 The workflow runs on GitHub's hosted runners. For faster builds,
 `build-server/setup-mac.sh` sets up a Mac with Apple silicon as a

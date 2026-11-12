@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Builds CEF's minimal binary distribution for macOS on Apple silicon from
 # source, with the H.264, AAC and HEVC decoders the official builds leave out.
+# On a Mac of your own (README, "Building on a machine of our own"):
+#
+#   local                   fetch (unless the tree is there), build, distrib
+#   publish-local           create the release from this machine
+#
 # .github/workflows/build.yml runs it on GitHub's hosted Mac runners, where one
 # build takes a chain of jobs. Each command is one stage of such a job:
 #
@@ -14,9 +19,9 @@
 #   publish                 create the release with the distribution
 #   drop-artifacts <prefix> delete this run's artifacts named <prefix>...
 #
-# Settings come from the environment, which the workflow sets: CEF_VERSION
-# (required), CEF_REVISION, DEPOT_TOOLS_COMMIT, XCODE_VERSION, JOB_START,
-# BUILD_UNTIL_MINUTE, and CEF_WORK for a local build.
+# Settings come from the environment: CEF_VERSION (required), CEF_REVISION,
+# DEPOT_TOOLS_COMMIT, and CEF_WORK for the folder to build in (default ~/cef).
+# The workflow also sets XCODE_VERSION, JOB_START and BUILD_UNTIL_MINUTE.
 # Written for bash 3.2, the bash of the macOS runners.
 #
 # Based on OpenArch's scripts/cef-codecs.sh
@@ -38,6 +43,14 @@ CEF_BRANCH="$(echo "$CHROMIUM_VERSION" | cut -d. -f3)"
 commit="${CEF_VERSION#*+g}"
 CEF_COMMIT="${commit%%+*}"
 
+# depot_tools: the commit the CEF version's CHROMIUM_BUILD_COMPATIBILITY.txt
+# names as depot_tools_checkout (automate-git.py leaves it to us with
+# --no-depot-tools-update). For a version that names none, pick one on
+# purpose (git ls-remote https://chromium.googlesource.com/chromium/tools/depot_tools.git main).
+# The release notes record it.
+DEPOT_TOOLS_COMMIT="${DEPOT_TOOLS_COMMIT:-132599ebbd8d22d1b1bd5ea703a6d3bc493edd71}"
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # The same path in every job: the build files refer to it. CEF_WORK moves it,
 # for a build on a Mac of our own with an external disk.
 WORK="${CEF_WORK:-$HOME/cef}"
@@ -46,7 +59,8 @@ OUT="$SRC/out/Release_GN_arm64"
 NINJA="$SRC/third_party/ninja/ninja"
 XCODE_APP=/Applications/Xcode-cef.app
 STATE_DIR="${RUNNER_TEMP:-/tmp}/cef-state"
-DIST_DIR="${RUNNER_TEMP:-/tmp}/cef-distrib"
+# Next to the tree on a machine of our own: /tmp is emptied on restart.
+DIST_DIR="${RUNNER_TEMP:-$WORK}/cef-distrib"
 DIST_NAME="cef_binary_${CEF_VERSION}_macosarm64_minimal"
 # A release is never replaced: another build of a version is a revision of it.
 CEF_REVISION="${CEF_REVISION:-}"
@@ -160,7 +174,6 @@ fetch() {
   # depot_tools at DEPOT_TOOLS_COMMIT, set up as update_depot_tools would
   # (its packages and Python), without moving it (its scripts do not run
   # under `set -u`).
-  : "${DEPOT_TOOLS_COMMIT:?DEPOT_TOOLS_COMMIT is required}"
   git clone --quiet https://chromium.googlesource.com/chromium/tools/depot_tools.git "$WORK/depot_tools"
   git -C "$WORK/depot_tools" checkout --quiet "$DEPOT_TOOLS_COMMIT"
   (
@@ -199,10 +212,11 @@ fetch() {
   # files are translated and configured. They change no commit, so the
   # version stays the one checked above.
   local patch
-  for patch in "$(cd "$(dirname "$0")/.." && pwd)"/patches/*.patch; do
+  for patch in "$REPO_DIR"/patches/*.patch; do
     echo "Applying $(basename "$patch")"
     git -C "$SRC/cef" apply "$patch" || fail "$(basename "$patch") does not apply to CEF $CEF_VERSION."
   done
+  patches_hash > "$WORK/patches-applied"
 
   # What automate-git.py does before it builds: translate CEF's API files,
   # apply CEF's patches to Chromium, write args.gn and run gn gen. Only the
@@ -214,6 +228,11 @@ fetch() {
 
   prune
   echo "Disk: $(disk)"
+}
+
+# One hash over patches/: which patches a tree was made with.
+patches_hash() {
+  cat "$REPO_DIR"/patches/*.patch | shasum -a 256 | cut -d' ' -f1
 }
 
 # Fails unless GN resolved the codec args as EXPECTED_ARGS says.
@@ -263,6 +282,13 @@ build() {
   # Xcode 27 rejects the SDK link that rustc passes it in SDKROOT.
   export PATH="$SRC/third_party/cpython3/host/bin:$PATH"
   local stop budget stopped="${RUNNER_TEMP:-/tmp}/ninja-stopped" ninja_pid watchdog rc=0
+  if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
+    # No job to run out of time on a machine of our own.
+    NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient ||
+      fail "ninja failed with exit code $?."
+    output status=finished
+    return
+  fi
   stop=$((${JOB_START:?JOB_START is required} + ${BUILD_UNTIL_MINUTE:-300} * 60))
   budget=$((stop - $(date +%s)))
   rm -f "$stopped"
@@ -321,7 +347,11 @@ distrib() {
     echo "depot_tools $(git -C "$WORK/depot_tools" rev-parse HEAD)"
     tr '\n' ' ' < "$WORK/xcode-version"
     echo
-    echo "runner: ${RUNNER_ENVIRONMENT:-unknown} ${ImageOS:-} ${ImageVersion:-}"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "runner: ${RUNNER_ENVIRONMENT:-unknown} ${ImageOS:-} ${ImageVersion:-}"
+    else
+      echo "machine: our own, macOS $(sw_vers -productVersion)"
+    fi
   } > "$DIST_DIR/build-info.txt"
   cat "$DIST_DIR/build-info.txt" "$DIST_DIR/$DIST_NAME.tar.bz2.sha256"
   ls -lh "$DIST_DIR"
@@ -377,16 +407,77 @@ release_state() {
   fi
 }
 
+# Fetches unless this version's tree is in WORK already, then builds and
+# makes the distribution: the whole build, on a Mac of our own. Run again
+# after an interruption, it carries on where ninja stopped.
+local_build() {
+  [[ -z "${GITHUB_ACTIONS:-}" ]] || fail "local is for a machine of our own; the workflow runs the stages."
+  # ANGLE compiles its Metal shaders with it; from Xcode 27 on it is a
+  # download of its own, and the build fails hours in without it.
+  xcrun -f metal > /dev/null 2>&1 ||
+    fail "Xcode's Metal toolchain is missing. Get it with: xcodebuild -downloadComponent MetalToolchain"
+  local free_gb
+  if [[ ! -f "$OUT/args.gn" ]]; then
+    [[ ! -e "$WORK/chromium" && ! -e "$WORK/depot_tools" ]] ||
+      fail "$WORK holds an unfinished checkout. Delete it or set CEF_WORK to another folder."
+    mkdir -p "$WORK"
+    free_gb="$(df -g "$WORK" | awk 'NR == 2 { print $4 }')"
+    ((free_gb >= 120)) || fail "Only $free_gb GB free at $WORK; a build needs about 120."
+    fetch
+  else
+    # ninja would build whatever is there: make sure it is what was asked for.
+    use_depot_tools
+    local actual
+    actual="$(python3 "$SRC/cef/tools/cef_version.py" current)"
+    [[ "$actual" == "$CEF_VERSION" ]] ||
+      fail "The tree in $WORK is CEF $actual, not $CEF_VERSION. Set CEF_WORK to another folder."
+    [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
+      fail "patches/ changed since the tree in $WORK was made. Set CEF_WORK to another folder."
+    echo "Carrying on with the tree in $WORK"
+  fi
+  build
+  distrib
+  echo "Made $DIST_DIR/$DIST_NAME.tar.bz2. Publish it with: $0 publish-local"
+}
+
+# Publishes what local made, from this machine: gh must be signed in with
+# write access. The release names the commit of this checkout, so that has
+# to be origin's main with nothing changed.
+publish_local() {
+  [[ -z "${GITHUB_ACTIONS:-}" ]] || fail "publish-local is for a machine of our own."
+  [[ -z "$(git -C "$REPO_DIR" status --porcelain)" ]] || fail "This checkout has changes that are not committed."
+  git -C "$REPO_DIR" fetch --quiet origin main
+  GITHUB_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  [[ "$GITHUB_SHA" == "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" ]] ||
+    fail "This checkout is not at origin's main; the release would name a commit nobody can see there."
+  [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
+    fail "The tree in $WORK was made with other patches than this commit has."
+  GITHUB_REPOSITORY="$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner)"
+  export GH_REPO="$GITHUB_REPOSITORY"
+  local state
+  state="$(release_state)"
+  if [[ "$state" == state=published ]]; then
+    echo "Release $RELEASE_TAG holds this file already."
+    return
+  fi
+  publish
+}
+
 # Creates the release with the distribution and its SHA-256: as a draft with
 # all files, then published, so an immutable release is complete.
 publish() {
-  local file="$DIST_DIR/$DIST_NAME.tar.bz2" notes="${RUNNER_TEMP:-/tmp}/release-notes.md"
+  local file="$DIST_DIR/$DIST_NAME.tar.bz2" notes="${RUNNER_TEMP:-/tmp}/release-notes.md" origin
   (cd "$DIST_DIR" && shasum -a 256 -c "$DIST_NAME.tar.bz2.sha256")
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    origin="- Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID from $GITHUB_SHA
+- Check it: \`gh attestation verify $DIST_NAME.tar.bz2 --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/build.yml --source-ref refs/heads/main\`"
+  else
+    origin="- Built from $GITHUB_SHA with \`tools/build-cef.sh local\` on a machine of the Magnetite maintainers, not by the workflow, so it has no attestation. Its SHA-256 is in the file next to it."
+  fi
   cat > "$notes" << EOF
 CEF $CEF_VERSION, the minimal distribution for macOS on Apple silicon, built from source with the H.264, AAC and HEVC decoders that the official builds leave out.
 
-- Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID from $GITHUB_SHA
-- Check it: \`gh attestation verify $DIST_NAME.tar.bz2 --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/build.yml --source-ref refs/heads/main\`
+$origin
 
 \`\`\`
 $(cat "$DIST_DIR/build-info.txt")
@@ -421,6 +512,8 @@ drop_artifacts() {
 }
 
 case "${1:-}" in
+  local) local_build ;;
+  publish-local) publish_local ;;
   prepare) prepare ;;
   fetch) fetch ;;
   restore) restore ;;
@@ -431,7 +524,7 @@ case "${1:-}" in
   publish) publish ;;
   drop-artifacts) drop_artifacts "${2:-}" ;;
   *)
-    echo "usage: $0 prepare|fetch|restore|build|distrib|save|release-state|publish|drop-artifacts <prefix>" >&2
+    echo "usage: $0 local|publish-local|prepare|fetch|restore|build|distrib|save|release-state|publish|drop-artifacts <prefix>" >&2
     exit 2
     ;;
 esac
