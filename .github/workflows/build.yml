@@ -1,11 +1,15 @@
 name: Build CEF
 run-name: CEF ${{ inputs.cef_version }}
 
-# Builds CEF for macOS on Apple silicon from source with the H.264, AAC and
-# HEVC decoders the official builds leave out, and publishes the minimal
-# distribution as the release <version> (156.0.26) with its SHA-256 and a
-# signed provenance attestation. It builds and releases from main only. The
-# work is in tools/build-cef.sh.
+# Builds CEF for macOS on Apple silicon and for Linux on x86_64 from source
+# with the H.264, AAC and HEVC decoders the official builds leave out, and
+# publishes both minimal distributions as the release <version> (156.0.26)
+# with their SHA-256s and signed provenance attestations. It builds and
+# releases from main only. The work is in tools/build-cef.sh.
+#
+# Linux builds in one job on our self-hosted runner (build-linux), which has
+# no time limit to speak of and keeps its tree between runs. macOS builds on
+# GitHub's hosted Mac runners, as follows.
 #
 # A job may run for six hours, and a build on GitHub's free Mac runners takes
 # about thirteen. So the build is a chain of jobs: each one builds for five hours,
@@ -108,7 +112,7 @@ jobs:
         if: steps.build.outputs.status == 'finished'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: cef-distrib
+          name: cef-distrib-macosarm64
           path: ${{ runner.temp }}/cef-distrib/
           overwrite: true
           if-no-files-found: error
@@ -281,11 +285,35 @@ jobs:
     outputs: { status: "${{ steps.build.outputs.status }}" }
     steps: *resume
 
+  build-linux:
+    name: Build for Linux
+    if: github.ref == 'refs/heads/main'
+    # Our own machine (README, "Our own machines as runners").
+    runs-on: [self-hosted, Linux, X64]
+    # The whole build in one job; a self-hosted job may run for five days.
+    timeout-minutes: 1440
+    # Read only, as for the Mac jobs.
+    permissions: *build-permissions
+    steps:
+      - *checkout
+      # The tree stays in ~/cef on the runner: a re-run of this job carries
+      # on where ninja stopped, and the next version's run replaces it.
+      - name: Fetch, build and make the distribution
+        run: tools/build-cef.sh local
+      - name: Upload the distribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cef-distrib-linux64
+          path: ${{ runner.temp }}/cef-distrib/
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
     name: Publish the release
-    needs: [build-01, build-02, build-03, build-04, build-05, build-06, build-07, build-08, build-09, build-10, build-11, build-12]
-    # Runs when one build job finished and none failed, on main only.
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'failure') && contains(needs.*.outputs.status, 'finished') }}
+    needs: [build-01, build-02, build-03, build-04, build-05, build-06, build-07, build-08, build-09, build-10, build-11, build-12, build-linux]
+    # Runs when Linux and one Mac job finished and none failed, on main only.
+    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'failure') && contains(needs.*.outputs.status, 'finished') && needs.build-linux.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write # the release
@@ -297,9 +325,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Each platform's files in a folder of their own: cef-distrib/linux64 ...
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: cef-distrib
+          pattern: cef-distrib-*
+          merge-multiple: true
           path: ${{ runner.temp }}/cef-distrib
 
       # "new", or "published" when a re-run finds this very file released.
@@ -309,13 +339,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: tools/build-cef.sh release-state
 
-      # Anyone can check that this workflow built the archive from main
+      # Anyone can check that this workflow built the archives from main
       # (README, "Checking a release").
       - name: Attest the distribution's origin
         if: steps.release.outputs.state == 'new'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/cef-distrib/*.tar.bz2
+          subject-path: ${{ runner.temp }}/cef-distrib/*/*.tar.bz2
 
       - name: Create the release
         if: steps.release.outputs.state == 'new'

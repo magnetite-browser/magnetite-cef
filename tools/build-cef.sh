@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Builds CEF's minimal binary distribution for macOS on Apple silicon from
-# source, with the H.264, AAC and HEVC decoders the official builds leave out.
-# On a Mac of your own (README, "Building on a machine of our own"):
+# Builds CEF's minimal binary distribution from source, with the H.264, AAC
+# and HEVC decoders the official builds leave out, for the machine it runs on:
+# macOS on Apple silicon (macosarm64) or Linux on x86_64 (linux64).
+# On a machine of your own (README, "Building on a machine of our own") and
+# on the self-hosted Linux runner:
 #
 #   local                   fetch (unless the tree is there), build, distrib
 #   publish-local           create the release from this machine
 #
-# .github/workflows/build.yml runs it on GitHub's hosted Mac runners, where one
-# build takes a chain of jobs. Each command is one stage of such a job:
+# .github/workflows/build.yml runs the macOS build on GitHub's hosted Mac
+# runners, where one build takes a chain of jobs. Each command is one stage
+# of such a job:
 #
 #   prepare                 select Xcode, free disk space on the runner
 #   fetch                   check out CEF and Chromium, patch, configure (job 1)
 #   restore                 unpack the tree the previous job packed (jobs 2+)
 #   build                   run ninja until the job's time is nearly up
-#   distrib                 make cef_binary_<version>_macosarm64_minimal.tar.bz2
+#   distrib                 make cef_binary_<version>_<platform>_minimal.tar.bz2
 #   save                    pack the tree for the next job
 #   release-state           is the release made already (a re-run)?
-#   publish                 create the release with the distribution
+#   publish                 create the release with every platform's archive
 #   drop-artifacts <prefix> delete this run's artifacts named <prefix>...
 #
 # Settings come from the environment: CEF_VERSION (required), CEF_REVISION,
@@ -50,18 +53,43 @@ CEF_COMMIT="${commit%%+*}"
 # The release notes record it.
 DEPOT_TOOLS_COMMIT="${DEPOT_TOOLS_COMMIT:-132599ebbd8d22d1b1bd5ea703a6d3bc493edd71}"
 
+# What differs between the platforms:
+#   ARCH         CEF's name for the architecture: automate-git.py's and
+#                make_distrib.py's --<arch>-build, out/Release_GN_<arch>
+#   PLATFORM     the archive's platform name
+#   TARGETS      what ninja builds; make_distrib.py takes the files from them
+#   PLATFORM_GN  GN args of CEF's official builds for the platform
+#                (AutomatedBuildSetup in CEF's wiki): on Linux, Chromium's
+#                Debian sysroot instead of the host's libraries, and no CFI.
+OS="$(uname -s)"
+case "$OS-$(uname -m)" in
+  Darwin-arm64)
+    ARCH=arm64 PLATFORM=macosarm64 TARGETS=cefclient PLATFORM_GN=""
+    ;;
+  Linux-x86_64)
+    ARCH=x64 PLATFORM=linux64 TARGETS="cefclient chrome_sandbox"
+    PLATFORM_GN="use_sysroot=true is_cfi=false"
+    ;;
+  *)
+    echo "::error::This builds CEF on macOS on Apple silicon or Linux on x86_64, not $OS $(uname -m)." >&2
+    exit 1
+    ;;
+esac
+
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # The same path in every job: the build files refer to it. CEF_WORK moves it,
-# for a build on a Mac of our own with an external disk.
+# for a build on a machine of our own with an external disk.
 WORK="${CEF_WORK:-$HOME/cef}"
 SRC="$WORK/chromium/src"
-OUT="$SRC/out/Release_GN_arm64"
+OUT="$SRC/out/Release_GN_$ARCH"
 NINJA="$SRC/third_party/ninja/ninja"
 XCODE_APP=/Applications/Xcode-cef.app
 STATE_DIR="${RUNNER_TEMP:-/tmp}/cef-state"
 # Next to the tree on a machine of our own: /tmp is emptied on restart.
+# Each platform's files go into a folder of their own in it (DIST_DIR/
+# PLATFORM), so the publish job can hold all of them.
 DIST_DIR="${RUNNER_TEMP:-$WORK}/cef-distrib"
-DIST_NAME="cef_binary_${CEF_VERSION}_macosarm64_minimal"
+DIST_NAME="cef_binary_${CEF_VERSION}_${PLATFORM}_minimal"
 # A release is never replaced: another build of a version is a revision of it.
 CEF_REVISION="${CEF_REVISION:-}"
 if [[ -n "$CEF_REVISION" && ! "$CEF_REVISION" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
@@ -78,6 +106,16 @@ PRUNE_DIRS="third_party/blink/web_tests chrome/test/data content/test/data"
 # Never for the ones that call gh with a token.
 use_depot_tools() {
   export PATH="$WORK/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0
+}
+
+# sha256sum on Linux, shasum on macOS; each one's -c reads what the other wrote.
+sha256() {
+  if command -v sha256sum > /dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
+}
+
+# Free GB on the disk that holds $1.
+free_gb() {
+  df -Pk "$1" | awk 'NR == 2 { print int($4 / 1048576) }'
 }
 
 output() {
@@ -98,13 +136,15 @@ disk() {
 #   proprietary_codecs, ffmpeg_branding  H.264, AAC and HEVC; the point of it.
 #   media_use_openh264=false             no OpenH264 software encoder (it also
 #                                        turns off WebRTC's rtc_use_h264).
-#                                        Macs encode H.264 in hardware.
+#                                        Macs encode H.264 in hardware; on
+#                                        Linux, WebRTC sends VP8/VP9 instead.
 #   symbol_level=0                       no debug symbols: a smaller tree.
 #   treat_warnings_as_errors=false       a newer macOS SDK than Chromium was
 #                                        tested with must not stop the build.
+# And the platform's own, PLATFORM_GN.
 gn_defines() {
   echo "is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome" \
-    "media_use_openh264=false symbol_level=0 treat_warnings_as_errors=false"
+    "media_use_openh264=false symbol_level=0 treat_warnings_as_errors=false $PLATFORM_GN"
 }
 
 # The GN args the release must have, as `gn args --short` prints them.
@@ -123,10 +163,10 @@ prepare() {
   select_xcode
   free_disk
   echo "Disk: $(disk)"
-  local free_gb
-  free_gb="$(df -g "$HOME" | awk 'NR == 2 { print $4 }')"
-  if ((free_gb < 80)); then
-    echo "::warning::Only $free_gb GB free; the build tree grows to about 45 GB, and packing it needs room too."
+  local free
+  free="$(free_gb "$HOME")"
+  if ((free < 80)); then
+    echo "::warning::Only $free GB free; the build tree grows to about 45 GB, and packing it needs room too."
   fi
 }
 
@@ -188,7 +228,7 @@ fetch() {
   )
   use_depot_tools
   # The Xcode the tree is built with: later jobs must have the same.
-  xcodebuild -version > "$WORK/xcode-version"
+  if [[ "$OS" == Darwin ]]; then xcodebuild -version > "$WORK/xcode-version"; fi
 
   # CEF's checkout tool: depot_tools, CEF at the commit, the Chromium version
   # CEF names in CHROMIUM_BUILD_COMPATIBILITY.txt (without git history, which
@@ -198,7 +238,7 @@ fetch() {
   python3 "$WORK/automate-git.py" --download-dir="$WORK" \
     --depot-tools-dir="$WORK/depot_tools" --branch="$CEF_BRANCH" \
     --checkout="$CEF_COMMIT" --no-chromium-history --with-pgo-profiles \
-    --no-depot-tools-update --arm64-build --no-debug-build --no-build --no-distrib
+    --no-depot-tools-update "--$ARCH-build" --no-debug-build --no-build --no-distrib
   # automate-git.py works on its own clone; src/cef is a copy of it.
   rm -rf "$WORK/cef"
 
@@ -220,9 +260,11 @@ fetch() {
 
   # What automate-git.py does before it builds: translate CEF's API files,
   # apply CEF's patches to Chromium, write args.gn and run gn gen. Only the
-  # Release arm64 configuration.
-  (cd "$SRC/cef" && GN_DEFINES="$(gn_defines)" GN_OUT_CONFIGS=Release_GN_arm64 \
-    CEF_ENABLE_ARM64=1 python3 tools/gclient_hook.py)
+  # Release configuration of this machine's architecture. On Linux it also
+  # installs the sysroot (CEF_INSTALL_SYSROOT); without it, gn_args.py has
+  # no configuration to generate.
+  (cd "$SRC/cef" && GN_DEFINES="$(gn_defines)" GN_OUT_CONFIGS="Release_GN_$ARCH" \
+    CEF_ENABLE_ARM64=1 CEF_INSTALL_SYSROOT="$ARCH" python3 tools/gclient_hook.py)
   cat "$OUT/args.gn"
   check_args
 
@@ -232,7 +274,7 @@ fetch() {
 
 # One hash over patches/: which patches a tree was made with.
 patches_hash() {
-  cat "$REPO_DIR"/patches/*.patch | shasum -a 256 | cut -d' ' -f1
+  cat "$REPO_DIR"/patches/*.patch | sha256 | cut -d' ' -f1
 }
 
 # Fails unless GN resolved the codec args as EXPECTED_ARGS says.
@@ -261,7 +303,8 @@ prune() {
     mkdir -p "$trash/$(dirname "$dir")"
     mv "$SRC/$dir" "$trash/$dir"
   done
-  if "$NINJA" -C "$OUT" -n cefclient > /dev/null; then
+  # shellcheck disable=SC2086 # TARGETS is a list
+  if "$NINJA" -C "$OUT" -n $TARGETS > /dev/null; then
     rm -rf "$trash"
     return
   fi
@@ -272,24 +315,27 @@ prune() {
   rm -rf "$trash"
 }
 
-# Builds cefclient, which make_distrib.py takes the framework from, until
-# BUILD_UNTIL_MINUTE minutes after JOB_START. Sets the step output "status"
-# to "finished", or to "running" when the next job has to carry on.
+# Builds TARGETS, which make_distrib.py takes the files from. In the chain of
+# hosted Mac jobs (JOB_START set), only until BUILD_UNTIL_MINUTE minutes after
+# JOB_START. Sets the step output "status" to "finished", or to "running"
+# when the next job has to carry on.
 build() {
   use_depot_tools
   # Scripts the build starts as `env python3` (the linker driver) get
   # Chromium's own Python. /usr/bin/python3 asks xcodebuild for one, and
   # Xcode 27 rejects the SDK link that rustc passes it in SDKROOT.
   export PATH="$SRC/third_party/cpython3/host/bin:$PATH"
-  local stop budget stopped="${RUNNER_TEMP:-/tmp}/ninja-stopped" ninja_pid watchdog rc=0
-  if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
+  local stop budget stopped="${RUNNER_TEMP:-/tmp}/ninja-stopped" ninja_pid watchdog rc=0 jobs
+  jobs="$(getconf _NPROCESSORS_ONLN)"
+  if [[ -z "${JOB_START:-}" ]]; then
     # No job to run out of time on a machine of our own.
-    NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient ||
+    # shellcheck disable=SC2086 # TARGETS is a list
+    NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$jobs" $TARGETS ||
       fail "ninja failed with exit code $?."
     output status=finished
     return
   fi
-  stop=$((${JOB_START:?JOB_START is required} + ${BUILD_UNTIL_MINUTE:-300} * 60))
+  stop=$((JOB_START + ${BUILD_UNTIL_MINUTE:-300} * 60))
   budget=$((stop - $(date +%s)))
   rm -f "$stopped"
   if ((budget < 600)); then
@@ -302,7 +348,8 @@ build() {
   # Ninja is resumable by design: on SIGTERM it stops the compilers, deletes
   # their half-written outputs and exits, and the next job's ninja redoes
   # only those steps. A watchdog sends that signal when the time is up.
-  NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient &
+  # shellcheck disable=SC2086 # TARGETS is a list
+  NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$jobs" $TARGETS &
   ninja_pid=$!
   (
     sleep "$budget"
@@ -330,31 +377,44 @@ build() {
 
 # Makes the minimal distribution, the kind Magnetite's build otherwise
 # downloads from CEF's CDN, and puts it with its SHA-256 and the build's
-# args.gn into DIST_DIR.
+# args.gn into DIST_DIR/PLATFORM.
 distrib() {
   use_depot_tools
-  local out="$WORK/distrib"
-  rm -rf "$out" "$DIST_DIR"
-  mkdir -p "$out" "$DIST_DIR"
+  local out="$WORK/distrib" dist="$DIST_DIR/$PLATFORM"
+  rm -rf "$out" "$dist"
+  mkdir -p "$out" "$dist"
   (cd "$SRC/cef/tools" && CEF_ARCHIVE_FORMAT=tar.bz2 python3 make_distrib.py \
-    --output-dir="$out" --ninja-build --arm64-build --minimal --no-symbols --no-docs)
+    --output-dir="$out" --ninja-build "--$ARCH-build" --minimal --no-symbols --no-docs)
   [[ -f "$out/$DIST_NAME.tar.bz2" ]] || fail "Expected $DIST_NAME.tar.bz2, got: $(ls "$out")"
-  mv "$out/$DIST_NAME.tar.bz2" "$DIST_DIR/"
-  (cd "$DIST_DIR" && shasum -a 256 "$DIST_NAME.tar.bz2" > "$DIST_NAME.tar.bz2.sha256")
-  cp "$OUT/args.gn" "$DIST_DIR/args.gn"
+  mv "$out/$DIST_NAME.tar.bz2" "$dist/"
+  (cd "$dist" && sha256 "$DIST_NAME.tar.bz2" > "$DIST_NAME.tar.bz2.sha256")
+  cp "$OUT/args.gn" "$dist/args.gn"
   # What else went into it, for the release notes.
   {
     echo "depot_tools $(git -C "$WORK/depot_tools" rev-parse HEAD)"
-    tr '\n' ' ' < "$WORK/xcode-version"
-    echo
-    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-      echo "runner: ${RUNNER_ENVIRONMENT:-unknown} ${ImageOS:-} ${ImageVersion:-}"
-    else
-      echo "machine: our own, macOS $(sw_vers -productVersion)"
+    if [[ "$OS" == Darwin ]]; then
+      tr '\n' ' ' < "$WORK/xcode-version"
+      echo
     fi
-  } > "$DIST_DIR/build-info.txt"
-  cat "$DIST_DIR/build-info.txt" "$DIST_DIR/$DIST_NAME.tar.bz2.sha256"
-  ls -lh "$DIST_DIR"
+    if [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]; then
+      echo "runner: GitHub-hosted ${ImageOS:-} ${ImageVersion:-}"
+    elif [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "runner: our own, $(host_os)"
+    else
+      echo "machine: our own, $(host_os)"
+    fi
+  } > "$dist/build-info.txt"
+  cat "$dist/build-info.txt" "$dist/$DIST_NAME.tar.bz2.sha256"
+  ls -lh "$dist"
+}
+
+host_os() {
+  if [[ "$OS" == Darwin ]]; then
+    echo "macOS $(sw_vers -productVersion)"
+  else
+    # shellcheck disable=SC1091
+    (. /etc/os-release && echo "$PRETTY_NAME, Linux $(uname -r)")
+  fi
 }
 
 # Packs WORK into 1 GB parts in STATE_DIR. Each file is deleted as soon as it
@@ -365,14 +425,14 @@ save() {
   gtar -C "$(dirname "$WORK")" --remove-files -cf - "$(basename "$WORK")" |
     zstd -q -T0 -10 --long=27 |
     split -b 1024m - "$STATE_DIR/cef.tar.zst.part-"
-  (cd "$STATE_DIR" && shasum -a 256 cef.tar.zst.part-* > SHA256SUMS)
+  (cd "$STATE_DIR" && sha256 cef.tar.zst.part-* > SHA256SUMS)
   du -sh "$STATE_DIR"
 }
 
 # Unpacks what save packed. Each part is deleted once it has been read.
 restore() {
   local part
-  (cd "$STATE_DIR" && shasum -a 256 -c SHA256SUMS)
+  (cd "$STATE_DIR" && sha256 -c SHA256SUMS)
   for part in "$STATE_DIR"/cef.tar.zst.part-*; do
     cat "$part"
     rm "$part"
@@ -385,59 +445,93 @@ restore() {
   echo "Disk: $(disk)"
 }
 
+# Sets ARCHIVES to the archives in DIST_DIR, one per platform folder.
+find_archives() {
+  local archive
+  ARCHIVES=""
+  for archive in "$DIST_DIR"/*/cef_binary_*_minimal.tar.bz2; do
+    if [[ -f "$archive" ]]; then ARCHIVES="$ARCHIVES $archive"; fi
+  done
+  [[ -n "$ARCHIVES" ]] || fail "No distribution in $DIST_DIR."
+}
+
 # Sets the step output "state": "new" when RELEASE_TAG has no release yet,
-# "published" when it holds this very file (a re-run after the release was
-# made). A release with another file is an error: releases are never
-# replaced, since Magnetite pins the archive's hash.
+# "published" when it holds these very files (a re-run after the release
+# was made). A release with other files is an error: releases are never
+# replaced, since Magnetite pins the archives' hashes.
 release_state() {
-  local local_hash remote
-  local_hash="$(cut -d' ' -f1 "$DIST_DIR/$DIST_NAME.tar.bz2.sha256")"
-  if ! remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-    --jq ".assets[] | select(.name == \"$DIST_NAME.tar.bz2\") | .digest" 2> /dev/null)"; then
+  local assets archive name
+  find_archives
+  if ! assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+    --jq '.assets[] | .name + " " + .digest' 2> /dev/null)"; then
     # No release; a tag of that name would be taken as it is, wherever it
     # points.
     if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > /dev/null 2>&1; then
       fail "Tag $RELEASE_TAG exists without a release. Build it again as a new revision."
     fi
     output state=new
-  elif [[ "$remote" == "sha256:$local_hash" ]]; then
-    output state=published
-  else
-    fail "Release $RELEASE_TAG exists with another file. Build it again as a new revision."
+    return
   fi
+  for archive in $ARCHIVES; do
+    name="$(basename "$archive")"
+    grep -qxF "$name sha256:$(cut -d' ' -f1 "$archive.sha256")" <<< "$assets" ||
+      fail "Release $RELEASE_TAG exists without this $name. Build it again as a new revision."
+  done
+  output state=published
 }
 
 # Fetches unless this version's tree is in WORK already, then builds and
-# makes the distribution: the whole build, on a Mac of our own. Run again
-# after an interruption, it carries on where ninja stopped.
+# makes the distribution: the whole build in one go, on a machine of our own
+# or the self-hosted Linux runner. Run again after an interruption, it
+# carries on where ninja stopped.
+#
+# A tree it cannot carry on with (another version, other patches, a fetch
+# that stopped half-way) stops it on a machine of our own, where it may be
+# someone's work. On the runner the tree is only ever this script's, so it
+# is deleted and fetched again.
 local_build() {
-  [[ -z "${GITHUB_ACTIONS:-}" ]] || fail "local is for a machine of our own; the workflow runs the stages."
-  # ANGLE compiles its Metal shaders with it; from Xcode 27 on it is a
-  # download of its own, and the build fails hours in without it.
-  xcrun -f metal > /dev/null 2>&1 ||
-    fail "Xcode's Metal toolchain is missing. Get it with: xcodebuild -downloadComponent MetalToolchain"
-  local free_gb
-  if [[ ! -f "$OUT/args.gn" ]]; then
-    [[ ! -e "$WORK/chromium" && ! -e "$WORK/depot_tools" ]] ||
-      fail "$WORK holds an unfinished checkout. Delete it or set CEF_WORK to another folder."
-    mkdir -p "$WORK"
-    free_gb="$(df -g "$WORK" | awk 'NR == 2 { print $4 }')"
-    ((free_gb >= 120)) || fail "Only $free_gb GB free at $WORK; a build needs about 120."
-    fetch
+  [[ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]] ||
+    fail "local is for a machine of our own; on hosted runners the workflow runs the stages."
+  if [[ "$OS" == Darwin ]]; then
+    # ANGLE compiles its Metal shaders with it; from Xcode 27 on it is a
+    # download of its own, and the build fails hours in without it.
+    xcrun -f metal > /dev/null 2>&1 ||
+      fail "Xcode's Metal toolchain is missing. Get it with: xcodebuild -downloadComponent MetalToolchain"
   else
+    # Chromium's pkg-config wrapper runs the host's on the sysroot.
+    command -v pkg-config > /dev/null || fail "pkg-config is missing (the package pkgconf or pkg-config)."
+  fi
+  local problem="" actual free
+  if [[ -f "$OUT/args.gn" ]]; then
     # ninja would build whatever is there: make sure it is what was asked for.
     use_depot_tools
-    local actual
     actual="$(python3 "$SRC/cef/tools/cef_version.py" current)"
-    [[ "$actual" == "$CEF_VERSION" ]] ||
-      fail "The tree in $WORK is CEF $actual, not $CEF_VERSION. Set CEF_WORK to another folder."
-    [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
-      fail "patches/ changed since the tree in $WORK was made. Set CEF_WORK to another folder."
+    if [[ "$actual" != "$CEF_VERSION" ]]; then
+      problem="The tree in $WORK is CEF $actual, not $CEF_VERSION."
+    elif [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" != "$(patches_hash)" ]]; then
+      problem="patches/ changed since the tree in $WORK was made."
+    fi
+  elif [[ -e "$WORK/chromium" || -e "$WORK/depot_tools" ]]; then
+    problem="$WORK holds an unfinished checkout."
+  fi
+  if [[ -n "$problem" && -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "$problem Deleting it."
+    rm -rf "$WORK"
+  elif [[ -n "$problem" ]]; then
+    fail "$problem Delete it or set CEF_WORK to another folder."
+  fi
+  if [[ -f "$OUT/args.gn" ]]; then
     echo "Carrying on with the tree in $WORK"
+  else
+    mkdir -p "$WORK"
+    free="$(free_gb "$WORK")"
+    ((free >= 120)) || fail "Only $free GB free at $WORK; a build needs about 120."
+    fetch
   fi
   build
   distrib
-  echo "Made $DIST_DIR/$DIST_NAME.tar.bz2. Publish it with: $0 publish-local"
+  echo "Made $DIST_DIR/$PLATFORM/$DIST_NAME.tar.bz2."
+  if [[ -z "${GITHUB_ACTIONS:-}" ]]; then echo "Publish it with: $0 publish-local"; fi
 }
 
 # Publishes what local made, from this machine: gh must be signed in with
@@ -463,39 +557,42 @@ publish_local() {
   publish
 }
 
-# Creates the release with the distribution and its SHA-256: as a draft with
-# all files, then published, so an immutable release is complete.
+# Creates the release with every platform's distribution in DIST_DIR and
+# their SHA-256s: as a draft with all files, then published, so an immutable
+# release is complete.
 publish() {
-  local file="$DIST_DIR/$DIST_NAME.tar.bz2" notes="${RUNNER_TEMP:-/tmp}/release-notes.md" origin
-  (cd "$DIST_DIR" && shasum -a 256 -c "$DIST_NAME.tar.bz2.sha256")
+  local notes="${RUNNER_TEMP:-/tmp}/release-notes.md" origin archive dir names files=() platforms=""
+  find_archives
+  for archive in $ARCHIVES; do
+    (cd "$(dirname "$archive")" && sha256 -c "$(basename "$archive").sha256")
+    files+=("$archive" "$archive.sha256")
+    platforms="$platforms, $(basename "$(dirname "$archive")")"
+  done
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
     origin="- Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID from $GITHUB_SHA
-- Check it: \`gh attestation verify $DIST_NAME.tar.bz2 --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/build.yml --source-ref refs/heads/main\`"
+- Check an archive: \`gh attestation verify <archive> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/build.yml --source-ref refs/heads/main\`"
   else
-    origin="- Built from $GITHUB_SHA with \`tools/build-cef.sh local\` on a machine of the Magnetite maintainers, not by the workflow, so it has no attestation. Its SHA-256 is in the file next to it."
+    origin="- Built from $GITHUB_SHA with \`tools/build-cef.sh local\` on a machine of the Magnetite maintainers, not by the workflow, so it has no attestation. Each SHA-256 is in the file next to its archive."
   fi
-  cat > "$notes" << EOF
-CEF $CEF_VERSION, the minimal distribution for macOS on Apple silicon, built from source with the H.264, AAC and HEVC decoders that the official builds leave out.
-
-$origin
-
-\`\`\`
-$(cat "$DIST_DIR/build-info.txt")
-\`\`\`
-
-args.gn:
-
-\`\`\`
-$(cat "$DIST_DIR/args.gn")
-\`\`\`
-EOF
-  gh release create "$RELEASE_TAG" "$file" "$file.sha256" --draft --target "$GITHUB_SHA" \
+  {
+    echo "CEF $CEF_VERSION, the minimal distribution (${platforms#, }; macosarm64 is macOS on Apple silicon, linux64 Linux on x86_64), built from source with the H.264, AAC and HEVC decoders that the official builds leave out."
+    echo
+    echo "$origin"
+    for archive in $ARCHIVES; do
+      dir="$(dirname "$archive")"
+      # shellcheck disable=SC2016 # backticks for Markdown
+      printf '\n### %s\n\n```\n%s\n```\n\nargs.gn:\n\n```\n%s\n```\n' \
+        "$(basename "$dir")" "$(cat "$dir/build-info.txt")" "$(cat "$dir/args.gn")"
+    done
+  } > "$notes"
+  gh release create "$RELEASE_TAG" "${files[@]}" --draft --target "$GITHUB_SHA" \
     --title "CEF $RELEASE_TAG with H.264 and AAC" --notes-file "$notes"
   # GitHub renames some characters in asset names; "+" must survive. (Read
   # whole first: grep -q stopping early would fail the pipe.)
-  local names
   names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
-  grep -qxF "$DIST_NAME.tar.bz2" <<< "$names" || fail "The draft has no asset named $DIST_NAME.tar.bz2."
+  for archive in $ARCHIVES; do
+    grep -qxF "$(basename "$archive")" <<< "$names" || fail "The draft has no asset named $(basename "$archive")."
+  done
   gh release edit "$RELEASE_TAG" --draft=false
   echo "Published $RELEASE_TAG"
 }
