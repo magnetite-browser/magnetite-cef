@@ -7,18 +7,10 @@ run-name: CEF ${{ inputs.cef_version }}
 # signed provenance attestation. It builds and releases from main only. The
 # work is in tools/build-cef.sh.
 #
-# A job may run for six hours, and a build on GitHub's free Mac runners takes
-# about thirteen. So the build is a chain of jobs: each one builds for five hours,
-# packs the whole tree (sources, toolchains, the half-built out directory)
-# into an artifact, and the next job unpacks it and lets ninja carry on where
-# it stopped. The job that finishes makes the distribution; the jobs after it
-# are skipped. A job that fails (a lost runner, a network error) can be re-run
-# on its own with "Re-run failed jobs": every job's tree stays until the
-# publish job deletes them (or for seven days).
-#
-# The chain is OpenArch's (https://github.com/dpfaffenbauer/OpenArch),
-# Copyright (c) 2026 Dominik Pfaffenbauer, MIT licence:
-# LICENSES/OpenArch-MIT.txt.
+# The build runs on our own Mac (README, "Our Mac runner"), in one job. Its
+# tree stays on the Mac's build disk between runs, so a run only checks out
+# and builds what changed since the last one, and a job that failed carries
+# on where it stopped when it is run again.
 
 on:
   workflow_dispatch:
@@ -30,82 +22,48 @@ on:
       revision:
         description: Empty for the version's first release; 2, 3 … for another build of it (a release is never replaced)
         default: ""
+      fresh:
+        description: Delete the tree on the Mac and check out from zero (when an update of it failed)
+        type: boolean
+        default: false
 
 permissions: {}
 
-# One build per version at a time; builds of other versions wait their turn
-# without cancelling each other.
+# One build at a time: they share the Mac and its tree.
 concurrency:
-  group: build-cef-${{ inputs.cef_version }}
+  group: build-cef
   cancel-in-progress: false
 
 env:
   CEF_VERSION: ${{ inputs.cef_version }}
   CEF_REVISION: ${{ inputs.revision }}
-  # The Xcode to build with; when the image no longer has it, the image's
-  # default Xcode is used.
-  XCODE_VERSION: "26.5"
-  # A job may run for 360 minutes. Building stops 300 minutes after the job
-  # started, which leaves time to pack and upload the tree.
-  BUILD_UNTIL_MINUTE: "300"
-  # The number of the last build job below. It fails if the build is still
-  # not done; add jobs if that happens.
-  LAST_PART: "12"
 
 jobs:
-  build-01:
-    name: Fetch and build 01
+  build:
+    name: Build
     # Releases come from reviewed code only (README, "Checking a release").
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-26
-    timeout-minutes: 360
+    runs-on: [self-hosted, macOS, ARM64, cef-builder]
+    # A build of everything took 87 minutes on a faster Mac; a self-hosted
+    # job may run for five days.
+    timeout-minutes: 720
     # Read only: the build runs code it downloads (Chromium's hooks and
-    # tools), which must find no token worth taking. The publish job deletes
-    # the trees.
-    permissions: &build-permissions
+    # tools), which must find no token worth taking.
+    permissions:
       contents: read
     env:
-      PART: "01"
-      PREVIOUS: ""
-    outputs:
-      status: ${{ steps.build.outputs.status }}
+      # On the build disk, outside the runner's own folder, which it cleans.
+      CEF_WORK: /Volumes/cef/cef
+      CEF_FRESH: ${{ inputs.fresh }}
     steps:
-      - &clock
-        name: Note when the job started
-        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
-
-      - &checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # For automate-git.py; the image's default Python may be newer than
-      # depot_tools supports.
-      - &python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.13"
+      - name: Check out or update the tree, build, make the distribution
+        run: tools/build-cef.sh local
 
-      - &prepare
-        name: Prepare the runner (Xcode, disk space)
-        run: tools/build-cef.sh prepare
-
-      - name: Fetch CEF and Chromium, patch and configure
-        run: tools/build-cef.sh fetch
-
-      - &build
-        name: Build
-        id: build
-        run: tools/build-cef.sh build
-
-      - &distrib
-        name: Make the minimal distribution
-        if: steps.build.outputs.status == 'finished'
-        run: tools/build-cef.sh distrib
-
-      - &upload-distrib
-        name: Upload the distribution
-        if: steps.build.outputs.status == 'finished'
+      - name: Upload the distribution
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cef-distrib
@@ -114,182 +72,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - &save
-        name: Pack the build tree for the next job
-        if: steps.build.outputs.status == 'running'
-        run: tools/build-cef.sh save
-
-      - &upload-state
-        name: Upload the build tree
-        if: steps.build.outputs.status == 'running'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: cef-state-${{ env.PART }}
-          path: ${{ runner.temp }}/cef-state/
-          # Already zstd-compressed.
-          compression-level: 0
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 7
-
-      - &out-of-jobs
-        name: Give up when no job is left
-        if: steps.build.outputs.status == 'running' && env.PART == env.LAST_PART
-        run: |
-          echo "::error::Not done after $LAST_PART jobs. Add build jobs to this workflow and start a new run."
-          exit 1
-
-  build-02:
-    name: Build 02
-    needs: build-01
-    if: needs.build-01.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env:
-      PART: "02"
-      PREVIOUS: "01"
-    outputs:
-      status: ${{ steps.build.outputs.status }}
-    steps: &resume
-      - *clock
-      - *checkout
-      - *python
-      - *prepare
-      - name: Download the previous job's build tree
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: cef-state-${{ env.PREVIOUS }}
-          path: ${{ runner.temp }}/cef-state
-      - name: Unpack it
-        run: tools/build-cef.sh restore
-      - *build
-      - *distrib
-      - *upload-distrib
-      - *save
-      - *upload-state
-      - *out-of-jobs
-
-  # The same as build-02, each one after the one before.
-  build-03:
-    name: Build 03
-    needs: build-02
-    if: needs.build-02.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "03", PREVIOUS: "02" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-04:
-    name: Build 04
-    needs: build-03
-    if: needs.build-03.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "04", PREVIOUS: "03" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-05:
-    name: Build 05
-    needs: build-04
-    if: needs.build-04.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "05", PREVIOUS: "04" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-06:
-    name: Build 06
-    needs: build-05
-    if: needs.build-05.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "06", PREVIOUS: "05" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-07:
-    name: Build 07
-    needs: build-06
-    if: needs.build-06.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "07", PREVIOUS: "06" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-08:
-    name: Build 08
-    needs: build-07
-    if: needs.build-07.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "08", PREVIOUS: "07" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-09:
-    name: Build 09
-    needs: build-08
-    if: needs.build-08.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "09", PREVIOUS: "08" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-10:
-    name: Build 10
-    needs: build-09
-    if: needs.build-09.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "10", PREVIOUS: "09" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-11:
-    name: Build 11
-    needs: build-10
-    if: needs.build-10.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "11", PREVIOUS: "10" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
-  build-12:
-    name: Build 12
-    needs: build-11
-    if: needs.build-11.outputs.status == 'running'
-    runs-on: macos-26
-    timeout-minutes: 360
-    permissions: *build-permissions
-    env: { PART: "12", PREVIOUS: "11" }
-    outputs: { status: "${{ steps.build.outputs.status }}" }
-    steps: *resume
-
   publish:
     name: Publish the release
-    needs: [build-01, build-02, build-03, build-04, build-05, build-06, build-07, build-08, build-09, build-10, build-11, build-12]
-    # Runs when one build job finished and none failed, on main only.
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'failure') && contains(needs.*.outputs.status, 'finished') }}
+    needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write # the release
-      actions: write # deleting the build trees
       id-token: write # signing the attestation
       attestations: write
     steps:
@@ -324,9 +113,3 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: tools/build-cef.sh publish
 
-      - name: Delete the remaining build trees
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: tools/build-cef.sh drop-artifacts cef-state-

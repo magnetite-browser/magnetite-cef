@@ -1,28 +1,21 @@
 #!/usr/bin/env bash
 # Builds CEF's minimal binary distribution for macOS on Apple silicon from
 # source, with the H.264, AAC and HEVC decoders the official builds leave out.
-# On a Mac of your own (README, "Building on a machine of our own"):
 #
-#   local                   fetch (unless the tree is there), build, distrib
+#   local                   check out or update the tree, build, distrib
 #   publish-local           create the release from this machine
-#
-# .github/workflows/build.yml runs it on GitHub's hosted Mac runners, where one
-# build takes a chain of jobs. Each command is one stage of such a job:
-#
-#   prepare                 select Xcode, free disk space on the runner
-#   fetch                   check out CEF and Chromium, patch, configure (job 1)
-#   restore                 unpack the tree the previous job packed (jobs 2+)
-#   build                   run ninja until the job's time is nearly up
-#   distrib                 make cef_binary_<version>_macosarm64_minimal.tar.bz2
-#   save                    pack the tree for the next job
 #   release-state           is the release made already (a re-run)?
 #   publish                 create the release with the distribution
-#   drop-artifacts <prefix> delete this run's artifacts named <prefix>...
+#
+# .github/workflows/build.yml runs `local` on our own Mac runner and the last
+# two in its publish job. On a Mac of your own, `local` and `publish-local`
+# do the same without the workflow (README, "Building on a machine of our
+# own").
 #
 # Settings come from the environment: CEF_VERSION (required), CEF_REVISION,
-# DEPOT_TOOLS_COMMIT, and CEF_WORK for the folder to build in (default ~/cef).
-# The workflow also sets XCODE_VERSION, JOB_START and BUILD_UNTIL_MINUTE.
-# Written for bash 3.2, the bash of the macOS runners.
+# DEPOT_TOOLS_COMMIT, CEF_WORK for the folder to build in (default ~/cef) and
+# CEF_FRESH=true to delete that folder first.
+# Written for bash 3.2, the bash of macOS.
 #
 # Based on OpenArch's scripts/cef-codecs.sh
 # (https://github.com/dpfaffenbauer/OpenArch), Copyright (c) 2026 Dominik
@@ -51,15 +44,14 @@ CEF_COMMIT="${commit%%+*}"
 DEPOT_TOOLS_COMMIT="${DEPOT_TOOLS_COMMIT:-132599ebbd8d22d1b1bd5ea703a6d3bc493edd71}"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# The same path in every job: the build files refer to it. CEF_WORK moves it,
-# for a build on a Mac of our own with an external disk.
+# The tree: depot_tools, Chromium with CEF in it, and the build output. It
+# stays between builds, so the next one only does what changed.
 WORK="${CEF_WORK:-$HOME/cef}"
 SRC="$WORK/chromium/src"
 OUT="$SRC/out/Release_GN_arm64"
 NINJA="$SRC/third_party/ninja/ninja"
-XCODE_APP=/Applications/Xcode-cef.app
-STATE_DIR="${RUNNER_TEMP:-/tmp}/cef-state"
-# Next to the tree on a machine of our own: /tmp is emptied on restart.
+# In a workflow job the runner's temp folder, which the next step uploads
+# from; otherwise next to the tree (/tmp is emptied on restart).
 DIST_DIR="${RUNNER_TEMP:-$WORK}/cef-distrib"
 DIST_NAME="cef_binary_${CEF_VERSION}_macosarm64_minimal"
 # A release is never replaced: another build of a version is a revision of it.
@@ -69,10 +61,6 @@ if [[ -n "$CEF_REVISION" && ! "$CEF_REVISION" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
   exit 1
 fi
 RELEASE_TAG="$SHORT_VERSION${CEF_REVISION:+-$CEF_REVISION}"
-
-# Test data CEF never builds; dropped after configuring to shrink the tree
-# every job packs and unpacks (see prune).
-PRUNE_DIRS="third_party/blink/web_tests chrome/test/data content/test/data"
 
 # For the stages that build: depot_tools first on PATH, no self-updates.
 # Never for the ones that call gh with a token.
@@ -91,7 +79,7 @@ fail() {
 }
 
 disk() {
-  df -h "$(dirname "$WORK")" | awk 'NR == 2 { print $4 " free of " $2 }'
+  df -h "$WORK" | awk 'NR == 2 { print $4 " free of " $2 }'
 }
 
 # The GN args on top of what CEF sets itself (tools/gn_args.py).
@@ -113,68 +101,27 @@ ffmpeg_branding = "Chrome"
 media_use_openh264 = false
 rtc_use_h264 = false'
 
-prepare() {
-  # It deletes Xcode versions and SDKs: never on a machine of our own.
-  [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] ||
-    fail "prepare only runs on GitHub's hosted runners."
-  echo "Disk: $(disk)"
-  # Spotlight would index the tens of GB the build writes.
-  sudo mdutil -a -i off > /dev/null 2>&1 || true
-  select_xcode
-  free_disk
-  echo "Disk: $(disk)"
-  local free_gb
-  free_gb="$(df -g "$HOME" | awk 'NR == 2 { print $4 }')"
-  if ((free_gb < 80)); then
-    echo "::warning::Only $free_gb GB free; the build tree grows to about 45 GB, and packing it needs room too."
-  fi
-}
-
-# Keeps one Xcode, always at $XCODE_APP: compile commands contain the SDK
-# path, and a different path in a later job would make ninja rebuild all.
-select_xcode() {
-  local want="/Applications/Xcode_${XCODE_VERSION:-}.app" keep app
-  if [[ -z "${XCODE_VERSION:-}" || ! -d "$want" ]]; then
-    want="$(dirname "$(dirname "$(xcode-select -p)")")"
-    echo "::warning::Xcode ${XCODE_VERSION:-} is not on this image, using $want."
-  fi
-  keep="$(cd "$want" && pwd -P)"
-  for app in /Applications/Xcode*.app; do
-    if [[ -L "$app" ]]; then
-      sudo rm -f "$app"
-    elif [[ "$app" != "$keep" ]]; then
-      echo "Deleting $app"
-      sudo rm -rf "$app"
-    fi
-  done
-  sudo mv "$keep" "$XCODE_APP"
-  sudo xcode-select --switch "$XCODE_APP"
-  xcodebuild -version
-}
-
-# Simulators, the Android and .NET SDKs and other tool caches: tens of GB
-# Chromium does not need. Best effort; a failure here only costs space.
-free_disk() {
-  local tool
-  xcrun simctl delete all > /dev/null 2>&1 || true
-  sudo xcrun simctl runtime delete all > /dev/null 2>&1 || true
-  sudo rm -rf "${ANDROID_HOME:-$HOME/Library/Android/sdk}" "$HOME/.dotnet"
-  # Keeps Python, which actions/setup-python installs there.
-  for tool in "${RUNNER_TOOL_CACHE:-$HOME/hostedtoolcache}"/*; do
-    if [[ "$(basename "$tool")" != Python ]]; then sudo rm -rf "$tool"; fi
-  done
-}
-
-fetch() {
+# Brings the tree in WORK to CEF_VERSION with patches/ applied, and
+# configures it. The first time that is a full checkout of Chromium with its
+# git history, which an update needs. After that it is an update in place:
+# git rewrites only the files that differ between the versions, and ninja
+# builds only what depends on them.
+sync() {
   echo "CEF $CEF_VERSION: branch $CEF_BRANCH, commit $CEF_COMMIT"
   mkdir -p "$WORK"
+  # From here to the end the tree is in no state to build from.
+  rm -f "$WORK/patches-applied"
   # The commit's own checkout tool, not the branch's newest.
   curl -fsSL -o "$WORK/automate-git.py" \
     "https://raw.githubusercontent.com/chromiumembedded/cef/$CEF_COMMIT/tools/automate/automate-git.py"
   # depot_tools at DEPOT_TOOLS_COMMIT, set up as update_depot_tools would
   # (its packages and Python), without moving it (its scripts do not run
   # under `set -u`).
-  git clone --quiet https://chromium.googlesource.com/chromium/tools/depot_tools.git "$WORK/depot_tools"
+  if [[ ! -d "$WORK/depot_tools" ]]; then
+    git clone --quiet https://chromium.googlesource.com/chromium/tools/depot_tools.git "$WORK/depot_tools"
+  else
+    git -C "$WORK/depot_tools" fetch --quiet origin
+  fi
   git -C "$WORK/depot_tools" checkout --quiet "$DEPOT_TOOLS_COMMIT"
   (
     set +u
@@ -187,23 +134,32 @@ fetch() {
     bootstrap_python3
   )
   use_depot_tools
-  # The Xcode the tree is built with: later jobs must have the same.
-  xcodebuild -version > "$WORK/xcode-version"
 
-  # CEF's checkout tool: depot_tools, CEF at the commit, the Chromium version
-  # CEF names in CHROMIUM_BUILD_COMPATIBILITY.txt (without git history, which
-  # saves tens of GB), Chromium's hooks (clang, rust ...) and the PGO profiles
-  # official builds optimise with. It would also build, but cannot stop and
-  # resume, so that is done below.
+  # The update below wants CEF's files as git has them: take the last
+  # build's patches/ out again.
+  if [[ -d "$SRC/cef" ]]; then
+    git -C "$SRC/cef" reset --quiet --hard
+    git -C "$SRC/cef" clean --quiet -fd
+  fi
+
+  # CEF's checkout tool: CEF at the commit, the Chromium version CEF names in
+  # CHROMIUM_BUILD_COMPATIBILITY.txt, Chromium's hooks (clang, rust ...) and
+  # the PGO profiles official builds optimise with. With --fast-update it
+  # moves an existing tree to the version: it takes CEF's patches out of
+  # Chromium, checks out, puts them back, and restores every patched file
+  # that came out the same, so ninja does not build it again. It keeps the
+  # build output while CEF's branch (Chromium's build number) is the same and
+  # drops it for a new one. It would also build; that is done by build.
   python3 "$WORK/automate-git.py" --download-dir="$WORK" \
     --depot-tools-dir="$WORK/depot_tools" --branch="$CEF_BRANCH" \
-    --checkout="$CEF_COMMIT" --no-chromium-history --with-pgo-profiles \
+    --checkout="$CEF_COMMIT" --with-pgo-profiles --fast-update \
     --no-depot-tools-update --arm64-build --no-debug-build --no-build --no-distrib
-  # automate-git.py works on its own clone; src/cef is a copy of it.
-  rm -rf "$WORK/cef"
+  # The first checkout clones CEF there and copies it to src/cef; build
+  # output of other branches is parked there.
+  rm -rf "$WORK/cef" "$WORK"/out_*
 
   # The version is computed from git, as make_distrib.py will do; it names
-  # the archive, so a mismatch is better found now than in half a day.
+  # the archive, so a mismatch is better found now than after the build.
   local actual
   actual="$(python3 "$SRC/cef/tools/cef_version.py" current)"
   [[ "$actual" == "$CEF_VERSION" ]] || fail "The checkout is CEF $actual, not $CEF_VERSION."
@@ -216,17 +172,16 @@ fetch() {
     echo "Applying $(basename "$patch")"
     git -C "$SRC/cef" apply "$patch" || fail "$(basename "$patch") does not apply to CEF $CEF_VERSION."
   done
-  patches_hash > "$WORK/patches-applied"
 
   # What automate-git.py does before it builds: translate CEF's API files,
-  # apply CEF's patches to Chromium, write args.gn and run gn gen. Only the
-  # Release arm64 configuration.
+  # apply CEF's patches to Chromium (those already there are skipped), write
+  # args.gn and run gn gen. Only the Release arm64 configuration.
   (cd "$SRC/cef" && GN_DEFINES="$(gn_defines)" GN_OUT_CONFIGS=Release_GN_arm64 \
     CEF_ENABLE_ARM64=1 python3 tools/gclient_hook.py)
   cat "$OUT/args.gn"
   check_args
 
-  prune
+  patches_hash > "$WORK/patches-applied"
   echo "Disk: $(disk)"
 }
 
@@ -246,86 +201,18 @@ check_args() {
     fail "GN resolved the codec args differently (above); expected: $(echo "$EXPECTED_ARGS" | tr '\n' ';')"
 }
 
-# Moves PRUNE_DIRS out of the tree unless gn read files from them, then lets
-# ninja check (dry run) that the build needs nothing that went with them.
-# If it does, everything is put back.
-prune() {
-  local trash="$WORK/pruned" dir
-  mkdir -p "$trash"
-  for dir in $PRUNE_DIRS; do
-    [[ -d "$SRC/$dir" ]] || continue
-    if grep -qF " ../../$dir/" "$OUT/build.ninja.d"; then
-      echo "Keeping $dir: gn reads files from it"
-      continue
-    fi
-    mkdir -p "$trash/$(dirname "$dir")"
-    mv "$SRC/$dir" "$trash/$dir"
-  done
-  if "$NINJA" -C "$OUT" -n cefclient > /dev/null; then
-    rm -rf "$trash"
-    return
-  fi
-  echo "::warning::The build needs files from $PRUNE_DIRS; keeping them."
-  for dir in $PRUNE_DIRS; do
-    if [[ -d "$trash/$dir" ]]; then mv "$trash/$dir" "$SRC/$dir"; fi
-  done
-  rm -rf "$trash"
-}
-
-# Builds cefclient, which make_distrib.py takes the framework from, until
-# BUILD_UNTIL_MINUTE minutes after JOB_START. Sets the step output "status"
-# to "finished", or to "running" when the next job has to carry on.
+# Builds cefclient, which make_distrib.py takes the framework from. Ninja
+# builds only what is out of date, so after an interruption it carries on
+# where it stopped.
 build() {
   use_depot_tools
   # Scripts the build starts as `env python3` (the linker driver) get
   # Chromium's own Python. /usr/bin/python3 asks xcodebuild for one, and
   # Xcode 27 rejects the SDK link that rustc passes it in SDKROOT.
   export PATH="$SRC/third_party/cpython3/host/bin:$PATH"
-  local stop budget stopped="${RUNNER_TEMP:-/tmp}/ninja-stopped" ninja_pid watchdog rc=0
-  if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
-    # No job to run out of time on a machine of our own.
-    NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient ||
-      fail "ninja failed with exit code $?."
-    output status=finished
-    return
-  fi
-  stop=$((${JOB_START:?JOB_START is required} + ${BUILD_UNTIL_MINUTE:-300} * 60))
-  budget=$((stop - $(date +%s)))
-  rm -f "$stopped"
-  if ((budget < 600)); then
-    echo "Less than 10 minutes left, leaving the build to the next job"
-    output status=running
-    return
-  fi
-  echo "Building for at most $((budget / 60)) minutes. Disk: $(disk)"
-
-  # Ninja is resumable by design: on SIGTERM it stops the compilers, deletes
-  # their half-written outputs and exits, and the next job's ninja redoes
-  # only those steps. A watchdog sends that signal when the time is up.
-  NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient &
-  ninja_pid=$!
-  (
-    sleep "$budget"
-    kill -0 "$ninja_pid" || exit 0
-    touch "$stopped"
-    kill -TERM "$ninja_pid"
-    # Ninja exits within seconds; this is only the backstop.
-    sleep 600
-    kill -KILL "$ninja_pid"
-  ) 2> /dev/null &
-  watchdog=$!
-  wait "$ninja_pid" || rc=$?
-  kill "$watchdog" 2> /dev/null || true
-  wait "$watchdog" 2> /dev/null || true
-
+  NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(sysctl -n hw.ncpu)" cefclient ||
+    fail "ninja failed with exit code $?."
   echo "Disk: $(disk)"
-  if [[ -f "$stopped" ]]; then
-    output status=running
-  elif ((rc == 0)); then
-    output status=finished
-  else
-    fail "ninja failed with exit code $rc."
-  fi
 }
 
 # Makes the minimal distribution, the kind Magnetite's build otherwise
@@ -348,41 +235,13 @@ distrib() {
     tr '\n' ' ' < "$WORK/xcode-version"
     echo
     if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
-      echo "runner: ${RUNNER_ENVIRONMENT:-unknown} ${ImageOS:-} ${ImageVersion:-}"
+      echo "runner: our own, macOS $(sw_vers -productVersion)"
     else
       echo "machine: our own, macOS $(sw_vers -productVersion)"
     fi
   } > "$DIST_DIR/build-info.txt"
   cat "$DIST_DIR/build-info.txt" "$DIST_DIR/$DIST_NAME.tar.bz2.sha256"
   ls -lh "$DIST_DIR"
-}
-
-# Packs WORK into 1 GB parts in STATE_DIR. Each file is deleted as soon as it
-# is packed, so the tree and its archive never need the disk at once.
-save() {
-  rm -rf "$STATE_DIR"
-  mkdir -p "$STATE_DIR"
-  gtar -C "$(dirname "$WORK")" --remove-files -cf - "$(basename "$WORK")" |
-    zstd -q -T0 -10 --long=27 |
-    split -b 1024m - "$STATE_DIR/cef.tar.zst.part-"
-  (cd "$STATE_DIR" && shasum -a 256 cef.tar.zst.part-* > SHA256SUMS)
-  du -sh "$STATE_DIR"
-}
-
-# Unpacks what save packed. Each part is deleted once it has been read.
-restore() {
-  local part
-  (cd "$STATE_DIR" && shasum -a 256 -c SHA256SUMS)
-  for part in "$STATE_DIR"/cef.tar.zst.part-*; do
-    cat "$part"
-    rm "$part"
-  done | zstd -d -q --long=27 | gtar -C "$(dirname "$WORK")" -xf -
-  [[ -d "$OUT" ]] || fail "The unpacked tree has no $OUT."
-  # The compile commands name the SDK: another Xcode would mix two in one
-  # build (a refreshed runner image mid-chain).
-  [[ "$(xcodebuild -version)" == "$(cat "$WORK/xcode-version")" ]] ||
-    fail "This runner's Xcode differs from the one the build started with; start a new run."
-  echo "Disk: $(disk)"
 }
 
 # Sets the step output "state": "new" when RELEASE_TAG has no release yet,
@@ -407,37 +266,52 @@ release_state() {
   fi
 }
 
-# Fetches unless this version's tree is in WORK already, then builds and
-# makes the distribution: the whole build, on a Mac of our own. Run again
-# after an interruption, it carries on where ninja stopped.
+# Is the tree in WORK this version with these patches, configured? Then
+# there is nothing to check out, only to build.
+tree_is_current() {
+  [[ -f "$OUT/args.gn" ]] || return 1
+  [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] || return 1
+  [[ "$(use_depot_tools && python3 "$SRC/cef/tools/cef_version.py" current)" == "$CEF_VERSION" ]]
+}
+
+# The whole build: checks out or updates the tree unless it is this version
+# already, builds and makes the distribution. Run again after an
+# interruption, it carries on where it stopped.
 local_build() {
-  [[ -z "${GITHUB_ACTIONS:-}" ]] || fail "local is for a machine of our own; the workflow runs the stages."
   # ANGLE compiles its Metal shaders with it; from Xcode 27 on it is a
   # download of its own, and the build fails hours in without it.
   xcrun -f metal > /dev/null 2>&1 ||
     fail "Xcode's Metal toolchain is missing. Get it with: xcodebuild -downloadComponent MetalToolchain"
+  if [[ "${CEF_FRESH:-}" == true ]]; then
+    echo "Deleting $WORK"
+    rm -rf "${WORK:?}"
+  fi
+  mkdir -p "$WORK"
   local free_gb
-  if [[ ! -f "$OUT/args.gn" ]]; then
-    [[ ! -e "$WORK/chromium" && ! -e "$WORK/depot_tools" ]] ||
-      fail "$WORK holds an unfinished checkout. Delete it or set CEF_WORK to another folder."
-    mkdir -p "$WORK"
+  if [[ ! -e "$WORK/chromium" && ! -e "$WORK/depot_tools" ]]; then
     free_gb="$(df -g "$WORK" | awk 'NR == 2 { print $4 }')"
-    ((free_gb >= 120)) || fail "Only $free_gb GB free at $WORK; a build needs about 120."
-    fetch
+    ((free_gb >= 200)) || fail "Only $free_gb GB free at $WORK; the tree needs about 200."
+  elif [[ ! -d "$SRC/cef" ]]; then
+    fail "$WORK holds a checkout that never finished. Build with CEF_FRESH=true (the workflow's \"fresh\") to start over."
+  elif [[ "$(git -C "$SRC" rev-parse --is-shallow-repository)" == true ]]; then
+    fail "The tree in $WORK has no git history (an older version of this script made it) and cannot be updated. Build with CEF_FRESH=true (the workflow's \"fresh\")."
+  fi
+  # The compile commands name the SDK's path, not its version: ninja would
+  # not notice another Xcode and mix two SDKs in one build.
+  if [[ -f "$WORK/xcode-version" && "$(xcodebuild -version)" != "$(cat "$WORK/xcode-version")" ]]; then
+    echo "Xcode changed since the last build: building everything again."
+    rm -rf "$SRC/out"
+  fi
+  xcodebuild -version > "$WORK/xcode-version"
+
+  if tree_is_current; then
+    echo "The tree in $WORK is CEF $CEF_VERSION already"
   else
-    # ninja would build whatever is there: make sure it is what was asked for.
-    use_depot_tools
-    local actual
-    actual="$(python3 "$SRC/cef/tools/cef_version.py" current)"
-    [[ "$actual" == "$CEF_VERSION" ]] ||
-      fail "The tree in $WORK is CEF $actual, not $CEF_VERSION. Set CEF_WORK to another folder."
-    [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
-      fail "patches/ changed since the tree in $WORK was made. Set CEF_WORK to another folder."
-    echo "Carrying on with the tree in $WORK"
+    sync
   fi
   build
   distrib
-  echo "Made $DIST_DIR/$DIST_NAME.tar.bz2. Publish it with: $0 publish-local"
+  echo "Made $DIST_DIR/$DIST_NAME.tar.bz2."
 }
 
 # Publishes what local made, from this machine: gh must be signed in with
@@ -500,31 +374,13 @@ EOF
   echo "Published $RELEASE_TAG"
 }
 
-# Deletes this workflow run's artifacts whose name starts with $1.
-drop_artifacts() {
-  local prefix="${1:?usage: build-cef.sh drop-artifacts <name prefix>}" id
-  gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
-    --jq ".artifacts[] | select(.name | startswith(\"$prefix\")) | .id" |
-    while read -r id; do
-      gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
-      echo "Deleted artifact $id"
-    done
-}
-
 case "${1:-}" in
   local) local_build ;;
   publish-local) publish_local ;;
-  prepare) prepare ;;
-  fetch) fetch ;;
-  restore) restore ;;
-  build) build ;;
-  distrib) distrib ;;
-  save) save ;;
   release-state) release_state ;;
   publish) publish ;;
-  drop-artifacts) drop_artifacts "${2:-}" ;;
   *)
-    echo "usage: $0 local|publish-local|prepare|fetch|restore|build|distrib|save|release-state|publish|drop-artifacts <prefix>" >&2
+    echo "usage: $0 local|publish-local|release-state|publish" >&2
     exit 2
     ;;
 esac
