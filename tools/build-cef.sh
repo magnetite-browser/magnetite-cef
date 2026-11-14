@@ -161,8 +161,18 @@ sync() {
   # From here to the end the tree is in no state to build from.
   rm -f "$WORK/patches-applied"
   # The commit's own checkout tool, not the branch's newest.
-  curl -fsSL -o "$WORK/automate-git.py" \
+  curl -fsSL -o "$WORK/automate-git.orig.py" \
     "https://raw.githubusercontent.com/chromiumembedded/cef/$CEF_COMMIT/tools/automate/automate-git.py"
+  # In an update in place the tool applies CEF's runhooks patch for the hooks
+  # and then once more with all the others, which stops it as "already
+  # applied" (issue #6). Take the patch back in between.
+  local hooks='  run("gclient runhooks", chromium_dir)'
+  [[ "$(grep -cxF -- "$hooks" "$WORK/automate-git.orig.py")" == 1 ]] ||
+    fail "automate-git.py has changed: no single line '$hooks' to fix it at (issue #6)"
+  awk -v hooks="$hooks" '{ print } $0 == hooks {
+    print "  if cef_dir == cef_src_dir:"
+    print "    run_patch_updater(\"--revert --patch runhooks\")"
+  }' "$WORK/automate-git.orig.py" > "$WORK/automate-git.py"
   # depot_tools at DEPOT_TOOLS_COMMIT, set up as update_depot_tools would
   # (its packages and Python), without moving it (its scripts do not run
   # under `set -u`).
