@@ -67,7 +67,9 @@ case "$OS-$(uname -m)" in
     ARCH=arm64 PLATFORM=macosarm64 TARGETS=cefclient PLATFORM_GN=""
     ;;
   Linux-x86_64)
-    ARCH=x64 PLATFORM=linux64 TARGETS="cefclient chrome_sandbox"
+    # Not cefclient: it needs GTK's headers, which CEF leaves out with
+    # use_sysroot=true, and the distribution takes nothing from it.
+    ARCH=x64 PLATFORM=linux64 TARGETS="libcef chrome_sandbox"
     PLATFORM_GN="use_sysroot=true is_cfi=false"
     ;;
   *)
