@@ -1,16 +1,16 @@
 name: Build CEF
 run-name: CEF ${{ inputs.cef_version }}
 
-# Builds CEF for macOS on Apple silicon from source with the H.264, AAC and
-# HEVC decoders the official builds leave out, and publishes the minimal
-# distribution as the release <version> (156.0.26) with its SHA-256 and a
-# signed provenance attestation. It builds and releases from main only. The
-# work is in tools/build-cef.sh.
+# Builds CEF for macOS on Apple silicon and for Linux on x86_64 from source
+# with the H.264, AAC and HEVC decoders the official builds leave out, and
+# publishes both minimal distributions as the release <version> (156.0.26)
+# with their SHA-256s and signed provenance attestations. It builds and
+# releases from main only. The work is in tools/build-cef.sh.
 #
-# The build runs on our own Mac (README, "Our Mac runner"), in one job. Its
-# tree stays on the Mac's build disk between runs, so a run only checks out
-# and builds what changed since the last one, and a job that failed carries
-# on where it stopped when it is run again.
+# Each platform builds on a machine of our own (README, "Our own machines as
+# runners"), in one job. Its tree stays on that machine between runs, so a
+# run only checks out and builds what changed since the last one, and a job
+# that failed carries on where it stopped when it is run again.
 
 on:
   workflow_dispatch:
@@ -23,13 +23,13 @@ on:
         description: Empty for the version's first release; 2, 3 … for another build of it (a release is never replaced)
         default: ""
       fresh:
-        description: Delete the tree on the Mac and check out from zero (when an update of it failed)
+        description: Delete the trees on the runners and check out from zero (when an update of it failed)
         type: boolean
         default: false
 
 permissions: {}
 
-# One build at a time: they share the Mac and its tree.
+# One build at a time: they share the runners and their trees.
 concurrency:
   group: build-cef
   cancel-in-progress: false
@@ -39,8 +39,8 @@ env:
   CEF_REVISION: ${{ inputs.revision }}
 
 jobs:
-  build:
-    name: Build
+  build-mac:
+    name: Build for macOS
     # Releases come from reviewed code only (README, "Checking a release").
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, macOS, ARM64, cef-builder]
@@ -55,7 +55,7 @@ jobs:
       # On the build disk, outside the runner's own folder, which it cleans.
       CEF_WORK: /Volumes/cef/cef
       CEF_FRESH: ${{ inputs.fresh }}
-    steps:
+    steps: &build-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -63,18 +63,33 @@ jobs:
       - name: Check out or update the tree, build, make the distribution
         run: tools/build-cef.sh local
 
+      # Its files are in a folder named after the platform.
       - name: Upload the distribution
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: cef-distrib
+          name: cef-distrib-${{ runner.os }}
           path: ${{ runner.temp }}/cef-distrib/
           overwrite: true
           if-no-files-found: error
           retention-days: 30
 
+  build-linux:
+    name: Build for Linux
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 720
+    # Read only, as for the Mac.
+    permissions:
+      contents: read
+    env:
+      # The tree stays in ~/cef on the runner.
+      CEF_FRESH: ${{ inputs.fresh }}
+    steps: *build-steps
+
   publish:
     name: Publish the release
-    needs: build
+    # Both platforms, or no release: a release cannot take files later.
+    needs: [build-mac, build-linux]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
@@ -86,25 +101,27 @@ jobs:
         with:
           persist-credentials: false
 
+      # Each platform's files in a folder of their own: cef-distrib/linux64 ...
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: cef-distrib
+          pattern: cef-distrib-*
+          merge-multiple: true
           path: ${{ runner.temp }}/cef-distrib
 
-      # "new", or "published" when a re-run finds this very file released.
+      # "new", or "published" when a re-run finds these very files released.
       - name: Is it released already?
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: tools/build-cef.sh release-state
 
-      # Anyone can check that this workflow built the archive from main
+      # Anyone can check that this workflow built the archives from main
       # (README, "Checking a release").
       - name: Attest the distribution's origin
         if: steps.release.outputs.state == 'new'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/cef-distrib/*.tar.bz2
+          subject-path: ${{ runner.temp }}/cef-distrib/*/*.tar.bz2
 
       - name: Create the release
         if: steps.release.outputs.state == 'new'

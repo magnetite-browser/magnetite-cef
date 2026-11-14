@@ -1,0 +1,70 @@
+--- a/libcef/browser/views/window_view.cc	2026-11-13 14:26:36.266476710 +0100
++++ b/libcef/browser/views/window_view.cc	2026-11-13 14:26:36.280455490 +0100
+@@ -32,8 +32,8 @@
+ #if BUILDFLAG(IS_LINUX)
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
+ #include "ui/gfx/x/atom_cache.h"
+-#include "ui/linux/linux_ui_delegate.h"
+ #endif
++#include "ui/linux/linux_ui_delegate.h"
+ #endif
+ 
+ #if BUILDFLAG(IS_OZONE)
+@@ -51,6 +51,15 @@
+ 
+ namespace {
+ 
++#if BUILDFLAG(IS_LINUX)
++// One binary runs under X11 and under Wayland: the X11 calls in this file
++// are for the first only.
++bool UsesX11() {
++  auto* delegate = ui::LinuxUiDelegate::GetInstance();
++  return delegate && delegate->GetBackend() == ui::LinuxUiBackend::kX11;
++}
++#endif
++
+ // Specialize ClientView to handle Widget-related events.
+ class ClientViewEx : public views::ClientView {
+   METADATA_HEADER(ClientViewEx, views::ClientView)
+@@ -633,6 +642,16 @@
+ #endif
+ 
+           host_widget = parent_window_impl->widget();
++
++#if BUILDFLAG(IS_LINUX)
++          // Under Wayland a toplevel cannot be placed next to another one.
++          // A bubble is a wl_subsurface of its parent (ui::WaylandBubble):
++          // it keeps its place in the parent, moves with it and takes the
++          // keyboard when activated.
++          if (!UsesX11()) {
++            params.type = views::Widget::InitParams::TYPE_BUBBLE;
++          }
++#endif
+         }
+       }
+     }
+@@ -679,6 +698,7 @@
+ 
+ #if BUILDFLAG(IS_LINUX)
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
++  if (UsesX11()) {
+   auto x11window = static_cast<x11::Window>(view_util::GetWindowHandle(widget));
+   CHECK(x11window != x11::Window::None);
+ 
+@@ -716,6 +736,7 @@
+     ui::LinuxUiDelegate::GetInstance()->SetTransientWindowForParent(
+         parent, static_cast<gfx::AcceleratedWidget>(x11window));
+   }
++  }
+ #endif
+ #endif
+ 
+@@ -767,7 +788,7 @@
+ 
+ #if BUILDFLAG(IS_LINUX)
+ #if BUILDFLAG(SUPPORTS_OZONE_X11)
+-  if (host_widget()) {
++  if (host_widget() && UsesX11()) {
+     auto parent = static_cast<gfx::AcceleratedWidget>(
+         view_util::GetWindowHandle(host_widget()));
+     CHECK(parent);
