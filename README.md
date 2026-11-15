@@ -70,6 +70,14 @@ and the build itself, by building that commit again.
 Actions → Build CEF → Run workflow on `main`, with the full CEF version, as
 CEF names its archives (`156.0.15+gcf671c0+chromium-156.0.8078.80`).
 
+The Chromium version in it is the one that gets built. Usually it is the one
+the CEF commit was made for. For a Chromium security release that CEF has not
+followed yet, name the newer Chromium version of the same branch with the
+newest CEF commit (`156.0.30+g6028375+chromium-156.0.8078.100`) and, as the
+CEF version has a release already, a revision. CEF's patches are put onto
+that Chromium version; if one does not apply, the build stops and CEF has to
+follow first. The release notes say which Chromium version CEF was made for.
+
 The run then waits for approval: its jobs start once a reviewer of the
 environment `build` (Settings → Environments) approved it on the run's page.
 

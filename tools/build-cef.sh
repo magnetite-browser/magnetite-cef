@@ -30,6 +30,9 @@ if [[ ! "$CEF_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+g[0-9a-f]{7,}\+chromium-[0-9]
   exit 1
 fi
 SHORT_VERSION="${CEF_VERSION%%+*}"             # 156.0.26
+# The Chromium version to build with. It is the one the CEF commit names
+# (CHROMIUM_BUILD_COMPATIBILITY.txt) or a later one of the same branch: a
+# Chromium security release that CEF has not followed yet.
 CHROMIUM_VERSION="${CEF_VERSION##*+chromium-}" # 156.0.8078.88
 # CEF names its release branches after Chromium's build number (8078) ...
 CEF_BRANCH="$(echo "$CHROMIUM_VERSION" | cut -d. -f3)"
@@ -201,9 +204,11 @@ sync() {
     git -C "$SRC/cef" clean --quiet -fd
   fi
 
-  # CEF's checkout tool: CEF at the commit, the Chromium version CEF names in
-  # CHROMIUM_BUILD_COMPATIBILITY.txt, Chromium's hooks (clang, rust ...) and
-  # the PGO profiles official builds optimise with. With --fast-update it
+  # CEF's checkout tool: CEF at the commit, Chromium at CHROMIUM_VERSION,
+  # Chromium's hooks (clang, rust ...) and the PGO profiles official builds
+  # optimise with. For a Chromium version other than the one CEF names, the
+  # tool puts CEF's patches onto it and stops when one does not apply; CEF
+  # then has to follow first. With --fast-update it
   # moves an existing tree to the version: it takes CEF's patches out of
   # Chromium, checks out, puts them back, and restores every patched file
   # that came out the same, so ninja does not build it again. It keeps the
@@ -211,7 +216,8 @@ sync() {
   # drops it for a new one. It would also build; that is done by build.
   python3 "$WORK/automate-git.py" --download-dir="$WORK" \
     --depot-tools-dir="$WORK/depot_tools" --branch="$CEF_BRANCH" \
-    --checkout="$CEF_COMMIT" --with-pgo-profiles --fast-update \
+    --checkout="$CEF_COMMIT" --chromium-checkout="refs/tags/$CHROMIUM_VERSION" \
+    --with-pgo-profiles --fast-update \
     --no-depot-tools-update "--$ARCH-build" --no-debug-build --no-build --no-distrib
   # The first checkout clones CEF there and copies it to src/cef; build
   # output of other branches is parked there.
@@ -222,6 +228,10 @@ sync() {
   local actual
   actual="$(python3 "$SRC/cef/tools/cef_version.py" current)"
   [[ "$actual" == "$CEF_VERSION" ]] || fail "The checkout is CEF $actual, not $CEF_VERSION."
+  # The Chromium version CEF made the commit for, for the release notes.
+  sed -n "s|.*'chromium_checkout': 'refs/tags/\(.*\)'.*|\1|p" \
+    "$SRC/cef/CHROMIUM_BUILD_COMPATIBILITY.txt" > "$WORK/cef-chromium-version"
+  [[ -s "$WORK/cef-chromium-version" ]] || fail "No chromium_checkout in CEF's CHROMIUM_BUILD_COMPATIBILITY.txt."
 
   # Magnetite's own changes to CEF (patches/, see the README), before CEF's
   # files are translated and configured. They change no commit, so the
@@ -300,6 +310,9 @@ distrib() {
   # What else went into it, for the release notes.
   {
     echo "depot_tools $(git -C "$WORK/depot_tools" rev-parse HEAD)"
+    if [[ "$(cat "$WORK/cef-chromium-version")" != "$CHROMIUM_VERSION" ]]; then
+      echo "Chromium $CHROMIUM_VERSION; CEF $SHORT_VERSION was made for $(cat "$WORK/cef-chromium-version")"
+    fi
     if [[ "$OS" == Darwin ]]; then
       tr '\n' ' ' < "$WORK/xcode-version"
       echo
