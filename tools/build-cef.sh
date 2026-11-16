@@ -197,6 +197,26 @@ sync() {
   )
   use_depot_tools
 
+  # Our own changes to Chromium come out first: the magnetite_* patches that
+  # patches/ adds to CEF's list. CEF's tool takes out the patches of CEF's
+  # list as git has it, which the reset below brings back, so ours would stay
+  # in Chromium through the update. A file that CEF patches as well is then
+  # restored and the others are not, and putting the patch back fails as
+  # neither applied nor missing. Only our own hunks are taken back, file by
+  # file: a file may carry CEF's changes too, and after a build that stopped
+  # a patch may be there in part.
+  if [[ -d "$SRC/cef" ]]; then
+    local ours file
+    for ours in "$SRC"/cef/patch/patches/magnetite_*.patch; do
+      [[ -f "$ours" ]] || continue
+      echo "Taking $(basename "$ours") out of Chromium"
+      sed -n 's|^+++ ||p' "$ours" | while IFS= read -r file; do
+        git -C "$SRC" apply -p0 -R --ignore-whitespace --include="$file" "$ours" 2> /dev/null ||
+          echo "  $file: not in it, left as it is"
+      done
+    done
+  fi
+
   # The update below wants CEF's files as git has them: take the last
   # build's patches/ out again.
   if [[ -d "$SRC/cef" ]]; then
