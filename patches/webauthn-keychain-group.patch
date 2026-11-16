@@ -1,0 +1,91 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index 6f8b8d66..5e22e5e7 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -20,6 +20,15 @@ patches = [
+     # Necessary for grit integration.
+     'name': 'gritsettings',
+   },
++  {
++    # Magnetite: the Touch ID authenticator keeps its credentials in a
++    # keychain access group named after the running app's application
++    # identifier, not after Chromium's team and bundle identifier, which an
++    # app that embeds the framework cannot be entitled to.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_webauthn_keychain_group',
++  },
+   {
+     # Necessary for GN integration.
+     #
+diff --git a/patch/patches/magnetite_webauthn_keychain_group.patch b/patch/patches/magnetite_webauthn_keychain_group.patch
+new file mode 100644
+index 00000000..eaac1d3c
+--- /dev/null
++++ b/patch/patches/magnetite_webauthn_keychain_group.patch
+@@ -0,0 +1,65 @@
++diff --git chrome/browser/webauthn/chrome_web_authentication_delegate.cc chrome/browser/webauthn/chrome_web_authentication_delegate.cc
++--- chrome/browser/webauthn/chrome_web_authentication_delegate.cc
+++++ chrome/browser/webauthn/chrome_web_authentication_delegate.cc
++@@ -81,6 +81,12 @@
++ #endif
++ 
++ #if BUILDFLAG(IS_MAC)
+++#include <CoreFoundation/CoreFoundation.h>
+++#include <Security/Security.h>
+++
+++#include "base/apple/foundation_util.h"
+++#include "base/apple/scoped_cftyperef.h"
+++#include "base/strings/sys_string_conversions.h"
++ #include "device/fido/mac/credential_metadata.h"
++ #endif
++ 
++@@ -387,13 +393,36 @@
++ }
++ 
++ #if BUILDFLAG(IS_MAC)
+++namespace {
+++
+++// The keychain access group the Touch ID authenticator keeps its credentials
+++// in. Chromium names it at build time, from its own team and bundle
+++// identifier; an app that embeds this framework is signed with its own, and
+++// can only be entitled to a group that begins with them. So the group is the
+++// running app's application identifier (the entitlement its signature
+++// carries, "<team>.<bundle identifier>") with ".webauthn". An app signed
+++// without that entitlement gets Chromium's group as before, and with it no
+++// Touch ID authenticator.
+++std::string TouchIdKeychainAccessGroup() {
+++  base::apple::ScopedCFTypeRef<SecTaskRef> task(SecTaskCreateFromSelf(nullptr));
+++  if (task) {
+++    base::apple::ScopedCFTypeRef<CFTypeRef> value(
+++        SecTaskCopyValueForEntitlement(
+++            task.get(), CFSTR("com.apple.application-identifier"), nullptr));
+++    CFStringRef identifier = base::apple::CFCast<CFStringRef>(value.get());
+++    if (identifier && CFStringGetLength(identifier) > 0) {
+++      return base::SysCFStringRefToUTF8(identifier) + ".webauthn";
+++    }
+++  }
+++  return MAC_TEAM_IDENTIFIER_STRING "." MAC_BUNDLE_IDENTIFIER_STRING ".webauthn";
+++}
+++
+++}  // namespace
+++
++ // static
++ ChromeWebAuthenticationDelegate::TouchIdAuthenticatorConfig
++ ChromeWebAuthenticationDelegate::TouchIdAuthenticatorConfigForProfile(
++     Profile* profile) {
++-  constexpr char kKeychainAccessGroup[] =
++-      MAC_TEAM_IDENTIFIER_STRING "." MAC_BUNDLE_IDENTIFIER_STRING ".webauthn";
++-
++   std::string metadata_secret = profile->GetPrefs()->GetString(
++       webauthn::pref_names::kWebAuthnTouchIdMetadataSecretPrefName);
++   if (metadata_secret.empty() ||
++@@ -405,7 +434,7 @@
++   }
++ 
++   return TouchIdAuthenticatorConfig{
++-      .keychain_access_group = kKeychainAccessGroup,
+++      .keychain_access_group = TouchIdKeychainAccessGroup(),
++       .metadata_secret = std::move(metadata_secret)};
++ }
++ 
