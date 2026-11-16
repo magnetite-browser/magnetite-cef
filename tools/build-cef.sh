@@ -216,7 +216,7 @@ sync() {
         # that cannot be written) is not: nothing later would find it.
         if git -C "$SRC" apply -p0 -R --ignore-whitespace --check --include="$file" "$ours" 2> /dev/null; then
           git -C "$SRC" apply -p0 -R --ignore-whitespace --include="$file" "$ours" ||
-            fail "$(basename "$ours") does not come out of $file."
+            fail "$(basename "$ours") does not come out of $file: see git's message above (disk space, the file's permissions), then run the build again; if that does not help, run it with \"fresh\"."
         else
           echo "  $file: not in it, left as it is"
         fi
