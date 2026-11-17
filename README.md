@@ -195,6 +195,11 @@ CEF's tools take the platform from the machine they run on.
 lets `tools/build-cef.sh` name it instead; with it CEF writes the GN args it
 writes on Windows. The archive's patch list leaves it out.
 
+Those args (CDM host verification, the CDM's storage ID, RLZ) are for Windows
+and macOS only, and GN gives them to the toolchain of the building machine
+too, where Chromium refuses them. `patches/cross/host-toolchain-args.patch`
+switches them off there, as Chromium's own defaults do.
+
 Known or open:
 
 - Chromium's cross build leaves out its assembler files, so Crashpad cannot

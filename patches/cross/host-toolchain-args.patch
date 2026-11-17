@@ -1,0 +1,55 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index 045abcf3..29e04900 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -53,6 +53,13 @@ patches = [
+     # https://bugs.chromium.org/p/chromium/issues/detail?id=1420723
+     'name': 'gn_config',
+   },
++  {
++    # Magnetite: GN args that CEF sets for Windows are off in the toolchain
++    # of the Linux machine that builds, where Chromium refuses them.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_cross_host_args',
++  },
+   {
+     # Patches that must be applied after `gclient sync --nohooks` and before
+     # `gclient runhooks`.
+diff --git a/patch/patches/magnetite_cross_host_args.patch b/patch/patches/magnetite_cross_host_args.patch
+new file mode 100644
+index 00000000..7e08b0ed
+--- /dev/null
++++ b/patch/patches/magnetite_cross_host_args.patch
+@@ -0,0 +1,31 @@
++diff --git media/media_options.gni media/media_options.gni
++--- media/media_options.gni
+++++ media/media_options.gni
++@@ -273,6 +273,14 @@
++   # The key must be a string of at least 32 characters.
++   alternate_cdm_storage_id_key = ""
++ }
+++
+++# Magnetite: a build for Windows on Linux sets these for Windows, and GN gives
+++# the args to the toolchain of the machine that builds as well. There they
+++# are off, as Chromium's own defaults above have it.
+++enable_cdm_host_verification =
+++    enable_cdm_host_verification && (is_mac || is_win)
+++enable_cdm_storage_id =
+++    enable_cdm_storage_id && (is_win || is_mac || is_chromeos)
++ 
++ assert(!enable_cdm_host_verification || is_mac || is_win,
++        "CDM host verification is only supported on Mac and Windows.")
++diff --git rlz/buildflags/buildflags.gni rlz/buildflags/buildflags.gni
++--- rlz/buildflags/buildflags.gni
+++++ rlz/buildflags/buildflags.gni
++@@ -12,5 +12,9 @@
++   enable_rlz = is_chrome_branded && enable_rlz_support
++ }
++ 
+++# Magnetite: off in the toolchain of the machine that builds, when a build
+++# for Windows on Linux sets it (see //media/media_options.gni).
+++enable_rlz = enable_rlz && enable_rlz_support
+++
++ assert(!enable_rlz || enable_rlz_support,
++        "RLZ is only supported on Windows, Apple and ChromeOS.")
