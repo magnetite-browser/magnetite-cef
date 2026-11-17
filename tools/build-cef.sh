@@ -340,9 +340,10 @@ sync() {
   echo "Disk: $(disk)"
 }
 
-# One hash over PATCHES: which patches a tree was made with.
+# One hash over PATCHES and the GN args: what a tree was made and configured
+# with. A tree kept from a build with other args is configured again.
 patches_hash() {
-  cat "${PATCHES[@]}" | sha256 | cut -d' ' -f1
+  { cat "${PATCHES[@]}" && gn_defines; } | sha256 | cut -d' ' -f1
 }
 
 # depot_tools in WORK at DEPOT_TOOLS_COMMIT.
@@ -689,7 +690,7 @@ publish_local() {
   [[ "$GITHUB_SHA" == "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" ]] ||
     fail "This checkout is not at origin's main; the release would name a commit nobody can see there."
   [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
-    fail "The tree in $WORK was made with other patches than this commit has."
+    fail "The tree in $WORK was made with other patches or build settings than this commit has."
   GITHUB_REPOSITORY="$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner)"
   export GH_REPO="$GITHUB_REPOSITORY"
   local state
