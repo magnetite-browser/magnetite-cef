@@ -326,6 +326,12 @@ sync() {
     git -C "$SRC/cef" apply "$patch" || fail "$(basename "$patch") does not apply to CEF $CEF_VERSION."
   done
 
+  if [[ -n "$CEF_TARGET" ]]; then
+    # GN reads the SDK, and the hooks that mount it ran only if the Chromium
+    # version changed.
+    mount_win_toolchain
+  fi
+
   # What automate-git.py does before it builds: translate CEF's API files,
   # apply CEF's patches to Chromium (those already there are skipped), write
   # args.gn and run gn gen. Only the Release configuration of this machine's
@@ -384,6 +390,15 @@ use_win_toolchain() {
   export "GYP_MSVS_HASH_$wanted=$(basename "${zips[0]}" .zip)"
 }
 
+# The toolchain is in a folder that ignores case (ciopfs, a FUSE mount), as
+# the SDK's headers need. The mount does not outlive the job that made it:
+# the runner stops ciopfs with the job's other processes, and a restart
+# unmounts it. This mounts it again, taking a dead mount away first, and
+# unpacks nothing that is there. Needs use_win_toolchain before it.
+mount_win_toolchain() {
+  (cd "$SRC" && python3 build/vs_toolchain.py update --force)
+}
+
 # Fails unless GN resolved the codec args as EXPECTED_ARGS says.
 check_args() {
   local actual
@@ -408,10 +423,7 @@ build() {
   export PATH="$SRC/third_party/cpython3/host/bin:$PATH"
   if [[ -n "$CEF_TARGET" ]]; then
     use_win_toolchain "$SRC/build/vs_toolchain.py"
-    # The toolchain is in a folder that ignores case (ciopfs, a FUSE mount),
-    # as the SDK's headers need; a restart unmounts it. This mounts it again
-    # and unpacks nothing that is there.
-    (cd "$SRC" && python3 build/vs_toolchain.py update --force)
+    mount_win_toolchain
   fi
   # shellcheck disable=SC2086 # TARGETS is a list
   NINJA_STATUS="[%p %f/%t %e] " "$NINJA" -C "$OUT" -j "$(getconf _NPROCESSORS_ONLN)" $TARGETS ||
