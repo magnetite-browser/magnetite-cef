@@ -1,0 +1,41 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index 29e04900..15e80b04 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -60,6 +60,12 @@ patches = [
+     # change of ours stops applying with the next CEF version.
+     'name': 'magnetite_cross_host_args',
+   },
++  {
++    # Magnetite: the installer's archive names the target that makes V8's
++    # snapshot, which a build for Windows on Linux takes as an input.
++    # After gn_config, which changes the same file.
++    'name': 'magnetite_cross_installer_snapshot',
++  },
+   {
+     # Patches that must be applied after `gclient sync --nohooks` and before
+     # `gclient runhooks`.
+diff --git a/patch/patches/magnetite_cross_installer_snapshot.patch b/patch/patches/magnetite_cross_installer_snapshot.patch
+new file mode 100644
+index 00000000..bdb08c40
+--- /dev/null
++++ b/patch/patches/magnetite_cross_installer_snapshot.patch
+@@ -0,0 +1,18 @@
++diff --git chrome/installer/mini_installer/BUILD.gn chrome/installer/mini_installer/BUILD.gn
++--- chrome/installer/mini_installer/BUILD.gn
+++++ chrome/installer/mini_installer/BUILD.gn
++@@ -235,7 +235,13 @@
++   }
++ 
++   if (v8_use_external_startup_data) {
++-    deps += [ "//v8" ]
+++    # Magnetite: as Chromium has it from a later version on. //v8 does not
+++    # pass the target that makes snapshot_blob.bin on, and a build for
+++    # Windows on Linux, which has no context snapshot, lists that file below.
+++    deps += [
+++      "//v8",
+++      "//v8:run_mksnapshot_default",
+++    ]
++     if (use_v8_context_snapshot) {
++       inputs += [ "$root_out_dir/$v8_context_snapshot_filename" ]
++       deps += [ "//tools/v8_context_snapshot" ]

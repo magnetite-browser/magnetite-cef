@@ -200,6 +200,11 @@ and macOS only, and GN gives them to the toolchain of the building machine
 too, where Chromium refuses them. `patches/cross/host-toolchain-args.patch`
 switches them off there, as Chromium's own defaults do.
 
+A cross build has no V8 context snapshot, so the installer's archive takes
+V8's plain snapshot as an input without naming the target that makes it, and
+GN stops. `patches/cross/installer-snapshot-dep.patch` names it, as later
+Chromium versions do.
+
 Known or open:
 
 - Chromium's cross build leaves out its assembler files, so Crashpad cannot
