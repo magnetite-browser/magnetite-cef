@@ -586,7 +586,7 @@ win_toolchain() {
   [[ "$OS" == MINGW* ]] || fail "win-toolchain runs on Windows, under Git Bash."
   : "${WIN_TOOLCHAIN_KEY:?WIN_TOOLCHAIN_KEY is required}"
   local vs="$WORK/vs_toolchain.py" kits="/c/Program Files (x86)/Windows Kits/10" sdk wanted zips out
-  local vs_path dir extra aside="$WORK/msvc-aside"
+  local vs_path dir extra aside="$WORK/msvc-aside" status=0
   fetch_vs_toolchain
   wanted="$(vs_toolchain_value TOOLCHAIN_HASH "$vs")"
   sdk="$(vs_toolchain_value SDK_VERSION "$vs")"
@@ -607,10 +607,12 @@ win_toolchain() {
   rm -f "$WORK"/depot_tools/win_toolchain/*.zip
   # It also wants one MSVC toolset and one redistributable in that Visual
   # Studio, and GitHub's image has several: all but the newest of each wait
-  # in $aside while it runs.
+  # in $aside while it runs, and go back whether it worked or not.
   vs_path="$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
-    -prerelease -latest -version '[18,19)' -property installationPath | tr -d '\r')"
-  [[ -n "$vs_path" ]] || fail "vswhere finds no Visual Studio 2026."
+    -prerelease -version '[18,19)' -property installationPath | tr -d '\r')"
+  # One line, so it is the one the script takes.
+  [[ -n "$vs_path" && "$vs_path" != *$'\n'* ]] ||
+    fail "vswhere finds no Visual Studio 2026, or more than one: ${vs_path:-none}"
   vs_path="$(cygpath -u "$vs_path")"
   for dir in Tools redist; do
     mkdir -p "$aside/$dir"
@@ -620,12 +622,14 @@ win_toolchain() {
     done
   done
   (cd "$WORK/depot_tools/win_toolchain" &&
-    python package_from_installed.py 2026 -w "$sdk" --allow_multiple_vs_installs)
+    python package_from_installed.py 2026 -w "$sdk" --allow_multiple_vs_installs) || status=$?
   for dir in Tools redist; do
     for extra in "$aside/$dir"/*; do
-      [[ -d "$extra" ]] && mv "$extra" "$vs_path/VC/$dir/MSVC/"
+      [[ ! -d "$extra" ]] || mv "$extra" "$vs_path/VC/$dir/MSVC/" ||
+        echo "::warning::$extra did not go back to $vs_path/VC/$dir/MSVC: move it by hand."
     done
   done
+  [[ "$status" == 0 ]] || fail "package_from_installed.py failed ($status)."
   zips=("$WORK"/depot_tools/win_toolchain/*.zip)
   [[ -f "${zips[0]}" ]] || fail "package_from_installed.py made no zip."
   out="${RUNNER_TEMP:-$WORK}/win-toolchain/$wanted"
