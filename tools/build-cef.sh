@@ -511,8 +511,12 @@ tree_is_current() {
 local_build() {
   [[ "$OS" != MINGW* ]] || fail "The build for Windows runs on Linux; Windows does win-toolchain and win-check."
   if [[ -n "$CEF_TARGET" ]]; then
-    # Chromium mounts the Windows SDK with ciopfs, which it brings along.
-    command -v fusermount > /dev/null || fail "fusermount is missing (the package fuse, FUSE 2)."
+    # Chromium mounts the Windows SDK with ciopfs, which it brings along. It
+    # is linked against FUSE 2's library; fusermount alone can be FUSE 3's.
+    # Checked here, as the mount comes only after the hours of checkout.
+    command -v fusermount > /dev/null || fail "fusermount is missing (the package fuse or fuse3)."
+    [[ "$(PATH="$PATH:/usr/sbin:/sbin" ldconfig -p)" == *libfuse.so.2* ]] ||
+      fail "libfuse.so.2 is missing (FUSE 2's library: the package libfuse2t64 or libfuse2 on Debian and Ubuntu, fuse-libs on Fedora, fuse2 on Arch)."
   fi
   if [[ "$OS" == Darwin ]]; then
     # ANGLE compiles its Metal shaders with it; from Xcode 27 on it is a
