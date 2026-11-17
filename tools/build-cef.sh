@@ -176,24 +176,27 @@ disk() {
 
 # The GN args on top of what CEF sets itself (tools/gn_args.py).
 #   proprietary_codecs, ffmpeg_branding  H.264, AAC and HEVC; the point of it.
-#   media_use_openh264=false             no OpenH264 software encoder (it also
-#                                        turns off WebRTC's rtc_use_h264).
-#                                        Macs encode H.264 in hardware; on
-#                                        Linux, WebRTC sends VP8/VP9 instead.
+#                                        With them Chromium also builds the
+#                                        OpenH264 encoder (media_use_openh264,
+#                                        rtc_use_h264), which WebRTC needs to
+#                                        send H.264 at all: without it, it
+#                                        does not offer the hardware encoder
+#                                        either (seen: a screen shared in a
+#                                        Microsoft Teams call did not arrive).
 #   symbol_level=0                       no debug symbols: a smaller tree.
 #   treat_warnings_as_errors=false       a newer macOS SDK than Chromium was
 #                                        tested with must not stop the build.
 # And the platform's own, PLATFORM_GN.
 gn_defines() {
   echo "is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome" \
-    "media_use_openh264=false symbol_level=0 treat_warnings_as_errors=false $PLATFORM_GN"
+    "symbol_level=0 treat_warnings_as_errors=false $PLATFORM_GN"
 }
 
 # The GN args the release must have, as `gn args --short` prints them.
 EXPECTED_ARGS='proprietary_codecs = true
 ffmpeg_branding = "Chrome"
-media_use_openh264 = false
-rtc_use_h264 = false'
+media_use_openh264 = true
+rtc_use_h264 = true'
 
 # Brings the tree in WORK to CEF_VERSION with patches/ applied, and
 # configures it. The first time that is a full checkout of Chromium with its

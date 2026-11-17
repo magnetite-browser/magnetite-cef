@@ -112,9 +112,10 @@ was made, re-running the publish job finds the release and passes.
 Chromium's Debian sysroot, `use_sysroot=true is_cfi=false`) and adds:
 
 - `proprietary_codecs=true ffmpeg_branding=Chrome`: H.264, AAC and HEVC.
-- `media_use_openh264=false`: no OpenH264 software encoder; Macs encode
-  H.264 in hardware. This also turns off WebRTC's software H.264, so on
-  Linux WebRTC sends VP8/VP9.
+  With them Chromium also builds the OpenH264 encoder
+  (`media_use_openh264`, `rtc_use_h264`). WebRTC needs it to send H.264 at
+  all: without it, it does not offer the hardware encoder either (seen: a
+  screen shared in a Microsoft Teams call did not arrive).
 - `symbol_level=0`: no debug symbols.
 - `treat_warnings_as_errors=false`: a newer macOS SDK than Chromium was
   tested with must not stop the build.
