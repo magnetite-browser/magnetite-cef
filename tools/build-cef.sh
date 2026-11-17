@@ -690,7 +690,7 @@ publish_local() {
   [[ "$GITHUB_SHA" == "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" ]] ||
     fail "This checkout is not at origin's main; the release would name a commit nobody can see there."
   [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
-    fail "The tree in $WORK was made with other patches or build settings than this commit has."
+    fail "The tree in $WORK was made with other patches or build settings than this commit has. Build it again (tools/build-cef.sh local), then publish."
   GITHUB_REPOSITORY="$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner)"
   export GH_REPO="$GITHUB_REPOSITORY"
   local state
