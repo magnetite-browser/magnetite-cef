@@ -206,6 +206,11 @@ V8's plain snapshot as an input without naming the target that makes it, and
 GN stops. `patches/cross/installer-snapshot-dep.patch` names it, as later
 Chromium versions do.
 
+For the same reason the archive holds `snapshot_blob.bin` where CEF's own
+Windows archive holds `v8_context_snapshot.bin`
+(`patches/cross/distrib-plain-snapshot.patch`): an app has to ship that file
+next to `libcef.dll` instead.
+
 Known or open:
 
 - Chromium's cross build leaves out its assembler files, so Crashpad cannot

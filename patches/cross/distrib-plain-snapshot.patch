@@ -1,0 +1,18 @@
+diff --git a/tools/make_distrib.py b/tools/make_distrib.py
+index b3605449..08a22f76 100644
+--- a/tools/make_distrib.py
++++ b/tools/make_distrib.py
+@@ -1142,7 +1142,12 @@ def main(argv=None):
+         {'path': 'd3dcompiler_47.dll'},
+         {'path': 'dxcompiler.dll', 'conditional': True},
+         {'path': libcef_dll},
+-        {'path': 'v8_context_snapshot.bin'},
++        # Magnetite: a build for Windows on another platform has no context
++        # snapshot (Chromium's v8_context_snapshot.gni); libcef.dll then
++        # starts from V8's plain one.
++        {'path': 'snapshot_blob.bin'
++                 if 'MAGNETITE_TARGET_PLATFORM' in os.environ
++                 else 'v8_context_snapshot.bin'},
+         {'path': 'vk_swiftshader.dll'},
+         {'path': 'vk_swiftshader_icd.json'},
+         {'path': 'vulkan-1.dll'},
