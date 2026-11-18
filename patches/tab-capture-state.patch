@@ -1,0 +1,84 @@
+diff --git a/libcef/browser/browser_host_base.cc b/libcef/browser/browser_host_base.cc
+index c9f84e5..c403e96 100644
+--- a/libcef/browser/browser_host_base.cc
++++ b/libcef/browser/browser_host_base.cc
+@@ -7,6 +7,7 @@
+ #include <tuple>
+ 
+ #include "base/logging.h"
++#include "base/no_destructor.h"
+ #include "cef/libcef/browser/browser_guest_util.h"
+ #include "cef/libcef/browser/browser_info_manager.h"
+ #include "cef/libcef/browser/browser_platform_delegate.h"
+@@ -18,6 +19,9 @@
+ #include "cef/libcef/browser/thread_util.h"
+ #include "cef/libcef/common/frame_util.h"
+ #include "cef/libcef/common/net/url_util.h"
++#include "cef/libcef/common/process_message_impl.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
+ #include "chrome/browser/platform_util.h"
+ #include "chrome/browser/spellchecker/spellcheck_factory.h"
+ #include "chrome/browser/spellchecker/spellcheck_service.h"
+@@ -83,6 +87,52 @@ class WebContentsUserDataAdapter : public base::SupportsUserData::Data {
+   CefRefPtr<CefBrowserHostBase> browser_;
+ };
+ 
++// Tells a browser's client when a page starts or stops sharing the browser's
++// tab (getDisplayMedia with a tab as the source). Chrome's tab-sharing UI
++// registers the shared tab as mirrored for as long as it is shared. There is
++// no CEF callback for it, so the client hears of it as a process message
++// that names the browser process as its source, which no renderer's message
++// does: "magnetite.tab-capture", with one bool argument.
++class TabCaptureObserver : public MediaStreamCaptureIndicator::Observer {
++ public:
++  // Lives until the process ends, like the dispatcher.
++  static void EnsureCreated() {
++    static base::NoDestructor<TabCaptureObserver> instance;
++  }
++
++  TabCaptureObserver()
++      : indicator_(MediaCaptureDevicesDispatcher::GetInstance()
++                       ->GetMediaStreamCaptureIndicator()) {
++    indicator_->AddObserver(this);
++  }
++
++  TabCaptureObserver(const TabCaptureObserver&) = delete;
++  TabCaptureObserver& operator=(const TabCaptureObserver&) = delete;
++
++  void OnIsBeingMirroredChanged(content::WebContents* web_contents,
++                                bool is_being_mirrored) override {
++    CEF_REQUIRE_UIT();
++    auto browser = CefBrowserHostBase::GetBrowserForContents(web_contents);
++    if (!browser) {
++      return;
++    }
++    auto client = browser->GetClient();
++    auto frame = browser->GetMainFrame();
++    if (!client || !frame) {
++      return;
++    }
++    base::ListValue arguments;
++    arguments.Append(is_being_mirrored);
++    CefRefPtr<CefProcessMessageImpl> message(new CefProcessMessageImpl(
++        "magnetite.tab-capture", std::move(arguments), /*read_only=*/true));
++    client->OnProcessMessageReceived(browser.get(), frame, PID_BROWSER,
++                                     message.get());
++  }
++
++ private:
++  const scoped_refptr<MediaStreamCaptureIndicator> indicator_;
++};
++
+ }  // namespace
+ 
+ // static
+@@ -280,6 +331,8 @@ void CefBrowserHostBase::InitializeBrowser() {
+   DCHECK(web_contents);
+   WebContentsUserDataAdapter::Register(this);
+ 
++  TabCaptureObserver::EnsureCreated();
++
+   // Trigger a web preferences update now that the browser is attached.
+   // This ensures that OverrideWebPreferences can access browser settings.
+   web_contents->NotifyPreferencesChanged();
