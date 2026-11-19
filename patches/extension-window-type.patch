@@ -1,0 +1,44 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index f12e668..dfebd6e 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -44,6 +44,14 @@ patches = [
+     # https://bugs.chromium.org/p/chromium/issues/detail?id=623342
+     'name': 'runhooks',
+   },
++  {
++    # Magnetite: to extensions, the browser an application hosts in its own
++    # views is a "normal" window, not a "popup": tabs.query and windows.get
++    # with windowType "normal" find its tab.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_extension_window_type',
++  },
+   {
+     # Support component builds (GN is_component_build=true).
+     # https://github.com/chromiumembedded/cef/issues/1617
+diff --git a/patch/patches/magnetite_extension_window_type.patch b/patch/patches/magnetite_extension_window_type.patch
+new file mode 100644
+index 0000000..ca02f4c
+--- /dev/null
++++ b/patch/patches/magnetite_extension_window_type.patch
+@@ -0,0 +1,19 @@
++diff --git chrome/browser/extensions/browser_extension_window_controller.cc chrome/browser/extensions/browser_extension_window_controller.cc
++--- chrome/browser/extensions/browser_extension_window_controller.cc
+++++ chrome/browser/extensions/browser_extension_window_controller.cc
++@@ -76,6 +76,15 @@
++ #endif
++ 
++ api::tabs::WindowType GetTabsWindowType(const BrowserWindowInterface* browser) {
+++  // Magnetite: CEF makes the browser an application hosts in its own views as
+++  // TYPE_POPUP, to leave out Chrome's controls. To an extension it is the
+++  // window its pages are in: tabs.query({windowType: "normal"}) has to find
+++  // the tab, and windows.get has to call the window "normal".
+++  if (browser->GetType() == BrowserWindowInterface::TYPE_POPUP &&
+++      browser->IsNormalBrowser()) {
+++    return api::tabs::WindowType::kNormal;
+++  }
+++
++   switch (browser->GetType()) {
++     case BrowserWindowInterface::TYPE_APP:
++       return api::tabs::WindowType::kApp;
