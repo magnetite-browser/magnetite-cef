@@ -8,18 +8,17 @@
 #   release-state           is the release made already (a re-run)?
 #   publish                 create the release with every platform's archive
 #
-# An untested experiment: with CEF_TARGET=windows64 on Linux, `local` builds
-# for Windows on x86_64 (windows64) instead, in a tree of its own
-# (README, "Windows, built on Linux"). It has three stages of its own:
+# With CEF_TARGET=windows64 on Linux, `local` builds for Windows on x86_64
+# (windows64) instead, in a tree of its own (README, "Windows, built on
+# Linux"). It has three stages of its own:
 #
 #   win-toolchain           on Windows: package Visual Studio and the SDK
 #   win-toolchain-unpack    on Linux: take that package into the tree's folder
 #   win-check               on Windows: does the archive's libcef.dll load?
 #
-# .github/workflows/build-windows.yml runs them; it releases nothing.
-#
 # .github/workflows/build.yml runs `local` on our own runners, one per
-# platform, and the last two in its publish job. On a machine of your own, `local` and `publish-local`
+# platform, the Windows stages around the Windows build, and the last two in
+# its publish job. On a machine of your own, `local` and `publish-local`
 # do the same without the workflow (README, "Building on a machine of our
 # own").
 #
@@ -78,7 +77,7 @@ case "$OS-$(uname -m):$CEF_TARGET" in
     ARCH=x64 PLATFORM=linux64 TARGETS="libcef chrome_sandbox"
     PLATFORM_GN="use_sysroot=true is_cfi=false"
     ;;
-  # The experiment. On Linux the build; under Git Bash on Windows only
+  # Windows: on Linux the build; under Git Bash on Windows only
   # win-toolchain and win-check.
   Linux-x86_64:windows64 | MINGW*-x86_64:windows64)
     # The targets of CEF's official builds (automate-git.py).
@@ -736,7 +735,7 @@ publish() {
     origin="- Built from $GITHUB_SHA with \`tools/build-cef.sh local\` on a machine of the Magnetite maintainers, not by the workflow, so it has no attestation. Each SHA-256 is in the file next to its archive."
   fi
   {
-    echo "CEF $CEF_VERSION, the minimal distribution (${platforms#, }; macosarm64 is macOS on Apple silicon, linux64 Linux on x86_64), built from source with the H.264, AAC and HEVC decoders that the official builds leave out."
+    echo "CEF $CEF_VERSION, the minimal distribution (${platforms#, }; macosarm64 is macOS on Apple silicon, linux64 Linux on x86_64, windows64 Windows on x86_64), built from source with the H.264, AAC and HEVC decoders that the official builds leave out."
     echo
     echo "$origin"
     for archive in $ARCHIVES; do

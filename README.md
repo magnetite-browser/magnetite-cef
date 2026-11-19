@@ -33,6 +33,8 @@ the same version gets a revision, `156.0.15-2`), with:
   for macOS on Apple silicon, laid out like the official one on CEF's CDN;
 - `cef_binary_<version>_linux64_minimal.tar.bz2`: the same for Linux on
   x86_64;
+- `cef_binary_<version>_windows64_minimal.tar.bz2`: the same for Windows on
+  x86_64, with one difference ("Windows, built on Linux");
 - each one's SHA-256 (`.sha256`);
 - provenance attestations signed by GitHub, when the workflow built them.
 
@@ -83,9 +85,10 @@ follow first. The release notes say which Chromium version CEF was made for.
 The run then waits for approval: its jobs start once a reviewer of the
 environment `build` (Settings → Environments) approved it on the run's page.
 
-It builds both platforms at once, each in one job on a machine of our own
-(below), and publishes one release once both are done. A failed platform
-holds the release back. A platform's tree (Chromium with its git history,
+It builds the three platforms, each in one job on a machine of our own
+(below; Windows on the Linux machine, after or before the Linux build), and
+publishes one release once all are done. A failed platform holds the release
+back. A platform's tree (Chromium with its git history,
 CEF, the build output) stays on its machine, so a run does only what changed
 since the last one:
 
@@ -155,14 +158,11 @@ tools/build-cef.sh publish-local      # create the release
 Build releases only on a machine you would trust with Magnetite's signing
 key: what it builds ends up in every Magnetite release.
 
-## Windows, built on Linux (an untested experiment)
+## Windows, built on Linux
 
-Nothing of this has run yet. Actions → Build CEF for Windows (experiment)
-builds CEF for Windows on x86_64 on our Linux runner, with Chromium's cross
-build (`docs/win_cross.md` in Chromium), and leaves the minimal distribution
-(`cef_binary_<version>_windows64_minimal.tar.bz2`) as an artifact of the run.
-It releases nothing. CEF itself supports building for Windows on Windows
-only.
+The workflow builds CEF for Windows on x86_64 on our Linux runner, with
+Chromium's cross build (`docs/win_cross.md` in Chromium). CEF itself supports
+building for Windows on Windows only.
 
 What takes long runs on our runner, what is quick and needs Windows on
 GitHub's:
@@ -171,14 +171,15 @@ GitHub's:
    installs the Windows SDK Chromium asks for, packages it and the image's
    Visual Studio 2026 with depot_tools' `package_from_installed.py`, and
    hands the package to the next job as an encrypted artifact. Tick it for
-   the first run; the package then stays on the Linux runner
+   the first run on a runner; the package then stays on the Linux runner
    (`~/cef-windows64-toolchain`) until Chromium asks for another toolchain,
    which stops the build with a message.
-2. **build**, on our Linux runner: checks out a tree of its own
+2. **build-windows**, on our Linux runner: checks out a tree of its own
    (`~/cef-windows64`, another 200 GB), builds with `target_os="win"` and
    makes the distribution.
-3. **check**, on GitHub's Windows runner: loads the distribution's
-   `libcef.dll`. Whether CEF works, only Magnetite shows.
+3. **check-windows**, on GitHub's Windows runner: loads the distribution's
+   `libcef.dll`; without that there is no release. Whether CEF works, only
+   Magnetite shows.
 
 It needs:
 
