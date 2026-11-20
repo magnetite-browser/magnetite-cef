@@ -19,7 +19,7 @@ index e65325e..d4476bf 100644
  
    // Optionally override chrome::AddWebContents behavior. This is most often
 diff --git a/libcef/browser/chrome/chrome_browser_delegate.cc b/libcef/browser/chrome/chrome_browser_delegate.cc
-index 3c4eead..5964eb0 100644
+index 3c4eead..0379036 100644
 --- a/libcef/browser/chrome/chrome_browser_delegate.cc
 +++ b/libcef/browser/chrome/chrome_browser_delegate.cc
 @@ -6,6 +6,7 @@
@@ -49,7 +49,7 @@ index 3c4eead..5964eb0 100644
  
  ChromeBrowserDelegate::ChromeBrowserDelegate(
      Browser* browser,
-@@ -200,6 +207,111 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
+@@ -200,6 +207,115 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
    return browser;
  }
  
@@ -104,6 +104,9 @@ index 3c4eead..5964eb0 100644
 +  CefBrowserCreateParams::InitWindowInfo(&window_info,
 +                                         opener_browser_host.get());
 +
++  // The client's callback may close the opener.
++  base::WeakPtr<BrowserWindowInterface> weak_opener = opener->GetWeakPtr();
++
 +  CefPopupFeatures popup_features;
 +  bool no_javascript_access = false;
 +  if (life_span_handler->OnBeforePopup(
@@ -112,7 +115,8 @@ index 3c4eead..5964eb0 100644
 +          active ? CEF_WOD_NEW_FOREGROUND_TAB : CEF_WOD_NEW_BACKGROUND_TAB,
 +          /*user_gesture=*/false, popup_features, window_info,
 +          create_params.client, create_params.settings,
-+          create_params.extra_info, &no_javascript_access)) {
++          create_params.extra_info, &no_javascript_access) ||
++      !weak_opener) {
 +    return nullptr;
 +  }
 +
@@ -161,7 +165,7 @@ index 3c4eead..5964eb0 100644
  std::unique_ptr<content::WebContents> ChromeBrowserDelegate::AddWebContents(
      std::unique_ptr<content::WebContents> new_contents) {
    if (CefBrowserInfoManager::GetInstance()->AddWebContents(
-@@ -652,6 +764,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
+@@ -652,6 +768,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
                                                   opener_browser);
  }
  
@@ -213,10 +217,10 @@ index f12e668..3e787db 100644
      # https://codereview.chromium.org/1992243003
 diff --git a/patch/patches/magnetite_extension_tab.patch b/patch/patches/magnetite_extension_tab.patch
 new file mode 100644
-index 0000000..af8aa27
+index 0000000..19b48e7
 --- /dev/null
 +++ b/patch/patches/magnetite_extension_tab.patch
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,50 @@
 +diff --git chrome/browser/extensions/open_tab_helper.cc chrome/browser/extensions/open_tab_helper.cc
 +--- chrome/browser/extensions/open_tab_helper.cc
 ++++ chrome/browser/extensions/open_tab_helper.cc
@@ -239,7 +243,7 @@ index 0000000..af8aa27
 + #if !BUILDFLAG(IS_ANDROID)
 + #include "chrome/browser/ui/tabs/split_tab_metrics.h"
 + #include "chrome/browser/ui/unload_controller.h"
-+@@ -186,6 +191,22 @@ base::expected<content::WebContents*, std::string> OpenTabHelper::OpenTab(
++@@ -186,6 +191,27 @@ base::expected<content::WebContents*, std::string> OpenTabHelper::OpenTab(
 +   // will override this default.
 +   bool active = params.active.value_or(true);
 + 
@@ -249,6 +253,8 @@ index 0000000..af8aa27
 ++  // as a browser of the application instead, so the tab the extension gets
 ++  // back is the page on screen. Index, pinning and splitting mean nothing
 ++  // there.
+++  // The application is asked about the tab, and may close the window.
+++  base::WeakPtr<BrowserWindowInterface> weak_browser = browser.GetWeakPtr();
 ++  if (content::WebContents* cef_contents =
 ++          cef::BrowserDelegate::OpenExtensionTab(&browser, validated_url,
 ++                                                 active)) {
@@ -256,6 +262,9 @@ index 0000000..af8aa27
 ++      cef_contents->SetInitialFocus();
 ++    }
 ++    return cef_contents;
+++  }
+++  if (!weak_browser) {
+++    return base::unexpected(ExtensionTabUtil::kNoCurrentWindowError);
 ++  }
 ++#endif
 ++
