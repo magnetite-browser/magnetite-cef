@@ -1,25 +1,27 @@
 diff --git a/libcef/browser/chrome/browser_delegate.h b/libcef/browser/chrome/browser_delegate.h
-index e65325e..d4476bf 100644
+index e65325e..a3b49ce 100644
 --- a/libcef/browser/chrome/browser_delegate.h
 +++ b/libcef/browser/chrome/browser_delegate.h
-@@ -89,6 +89,15 @@ class BrowserDelegate {
+@@ -89,6 +89,17 @@ class BrowserDelegate {
        content::WebContents* inspected_web_contents,
        std::unique_ptr<content::WebContents>& devtools_contents);
  
 +  // Magnetite: optionally override how the tab that an extension asks for
 +  // with chrome.tabs.create is opened. |opener| is the Browser the extension
 +  // API chose for the tab. Returns the new tab's WebContents, already owned by
-+  // a new Browser and loading |url|, or nullptr to proceed with default tab
-+  // creation.
-+  static content::WebContents* OpenExtensionTab(BrowserWindowInterface* opener,
-+                                                const GURL& url,
-+                                                bool active);
++  // a new Browser and loading |url|; nullptr if the tab was opened this way
++  // and the client closed it meanwhile, so that no other tab is to be made;
++  // or no value to proceed with default tab creation.
++  static std::optional<content::WebContents*> OpenExtensionTab(
++      BrowserWindowInterface* opener,
++      const GURL& url,
++      bool active);
 +
    virtual ~BrowserDelegate() = default;
  
    // Optionally override chrome::AddWebContents behavior. This is most often
 diff --git a/libcef/browser/chrome/chrome_browser_delegate.cc b/libcef/browser/chrome/chrome_browser_delegate.cc
-index 3c4eead..0379036 100644
+index 3c4eead..97aeb79 100644
 --- a/libcef/browser/chrome/chrome_browser_delegate.cc
 +++ b/libcef/browser/chrome/chrome_browser_delegate.cc
 @@ -6,6 +6,7 @@
@@ -49,12 +51,12 @@ index 3c4eead..0379036 100644
  
  ChromeBrowserDelegate::ChromeBrowserDelegate(
      Browser* browser,
-@@ -200,6 +207,115 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
+@@ -200,6 +207,117 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
    return browser;
  }
  
 +// static
-+content::WebContents* ChromeBrowserDelegate::OpenExtensionTab(
++std::optional<content::WebContents*> ChromeBrowserDelegate::OpenExtensionTab(
 +    BrowserWindowInterface* opener,
 +    const GURL& url,
 +    bool active) {
@@ -70,7 +72,8 @@ index 3c4eead..0379036 100644
 +  // The client is asked first, with CefLifeSpanHandler::OnBeforePopup:
 +  // |popup_id| is kExtensionTabPopupId, which no popup of a page has, |frame|
 +  // is the opener's main frame and the disposition says whether the tab is to
-+  // be in front. Returning true leaves the tab to Chromium's default.
++  // be in front. Returning true leaves the tab to Chromium's default, as
++  // does every other way out of here that returns no value.
 +  static constexpr int kExtensionTabPopupId = -1;
 +
 +  CefRefPtr<CefBrowserHostBase> opener_browser_host =
@@ -78,14 +81,14 @@ index 3c4eead..0379036 100644
 +  if (!opener_browser_host ||
 +      !CefBrowserInfoManager::ShouldCreateViewsHostedPopup(
 +          opener_browser_host, /*use_default_browser_creation=*/false)) {
-+    return nullptr;
++    return std::nullopt;
 +  }
 +
 +  // Popups share the request context of their opener.
 +  Profile* profile = opener->GetProfile();
 +  if (CefRequestContextImpl::GetProfile(
 +          opener_browser_host->request_context()) != profile) {
-+    return nullptr;
++    return std::nullopt;
 +  }
 +
 +  CefBrowserCreateParams create_params;
@@ -97,7 +100,7 @@ index 3c4eead..0379036 100644
 +                               ? create_params.client->GetLifeSpanHandler()
 +                               : nullptr;
 +  if (!life_span_handler) {
-+    return nullptr;
++    return std::nullopt;
 +  }
 +
 +  CefWindowInfo window_info;
@@ -117,7 +120,7 @@ index 3c4eead..0379036 100644
 +          create_params.client, create_params.settings,
 +          create_params.extra_info, &no_javascript_access) ||
 +      !weak_opener) {
-+    return nullptr;
++    return std::nullopt;
 +  }
 +
 +  create_params.popup_with_views_hosted_opener = true;
@@ -151,8 +154,9 @@ index 3c4eead..0379036 100644
 +  browser_host->AddNewContents(std::move(contents), std::nullopt);
 +
 +  if (!weak_contents) {
-+    // Closed by the client meanwhile: there is no tab of ours to return.
-+    return nullptr;
++    // Closed by the client meanwhile: the tab was opened and is gone, and
++    // Chromium is not to open another one.
++    return std::optional<content::WebContents*>(nullptr);
 +  }
 +
 +  content::NavigationController::LoadURLParams load_params(url);
@@ -165,12 +169,12 @@ index 3c4eead..0379036 100644
  std::unique_ptr<content::WebContents> ChromeBrowserDelegate::AddWebContents(
      std::unique_ptr<content::WebContents> new_contents) {
    if (CefBrowserInfoManager::GetInstance()->AddWebContents(
-@@ -652,6 +768,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
+@@ -652,6 +770,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
                                                   opener_browser);
  }
  
 +// static
-+content::WebContents* BrowserDelegate::OpenExtensionTab(
++std::optional<content::WebContents*> BrowserDelegate::OpenExtensionTab(
 +    BrowserWindowInterface* opener,
 +    const GURL& url,
 +    bool active) {
@@ -181,16 +185,17 @@ index 3c4eead..0379036 100644
  Browser* BrowserDelegate::CreateDevToolsBrowser(
      Profile* profile,
 diff --git a/libcef/browser/chrome/chrome_browser_delegate.h b/libcef/browser/chrome/chrome_browser_delegate.h
-index 639ecc8..3d9d2f7 100644
+index 639ecc8..14005a4 100644
 --- a/libcef/browser/chrome/chrome_browser_delegate.h
 +++ b/libcef/browser/chrome/chrome_browser_delegate.h
-@@ -57,6 +57,10 @@ class ChromeBrowserDelegate : public cef::BrowserDelegate {
+@@ -57,6 +57,11 @@ class ChromeBrowserDelegate : public cef::BrowserDelegate {
        content::WebContents* inspected_web_contents,
        std::unique_ptr<content::WebContents>& devtools_contents);
  
-+  static content::WebContents* OpenExtensionTab(BrowserWindowInterface* opener,
-+                                                const GURL& url,
-+                                                bool active);
++  static std::optional<content::WebContents*> OpenExtensionTab(
++      BrowserWindowInterface* opener,
++      const GURL& url,
++      bool active);
 +
    // cef::BrowserDelegate methods:
    std::unique_ptr<content::WebContents> AddWebContents(
@@ -217,14 +222,19 @@ index f12e668..3e787db 100644
      # https://codereview.chromium.org/1992243003
 diff --git a/patch/patches/magnetite_extension_tab.patch b/patch/patches/magnetite_extension_tab.patch
 new file mode 100644
-index 0000000..19b48e7
+index 0000000..067b430
 --- /dev/null
 +++ b/patch/patches/magnetite_extension_tab.patch
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,59 @@
 +diff --git chrome/browser/extensions/open_tab_helper.cc chrome/browser/extensions/open_tab_helper.cc
 +--- chrome/browser/extensions/open_tab_helper.cc
 ++++ chrome/browser/extensions/open_tab_helper.cc
-+@@ -7,6 +7,7 @@
++@@ -4,9 +4,12 @@
++ 
++ #include "chrome/browser/extensions/open_tab_helper.h"
++ 
+++#include <optional>
+++
 + #include "base/memory/weak_ptr.h"
 + #include "base/strings/string_number_conversions.h"
 + #include "base/types/expected_macros.h"
@@ -232,7 +242,7 @@ index 0000000..19b48e7
 + #include "chrome/browser/extensions/api/tabs/tabs_constants.h"
 + #include "chrome/browser/extensions/browser_window_util.h"
 + #include "chrome/browser/extensions/chrome_extension_function_details.h"
-+@@ -33,6 +34,10 @@
++@@ -33,6 +36,10 @@
 + #include "ui/base/window_open_disposition.h"
 + #include "url/gurl.h"
 + 
@@ -243,7 +253,7 @@ index 0000000..19b48e7
 + #if !BUILDFLAG(IS_ANDROID)
 + #include "chrome/browser/ui/tabs/split_tab_metrics.h"
 + #include "chrome/browser/ui/unload_controller.h"
-+@@ -186,6 +191,27 @@ base::expected<content::WebContents*, std::string> OpenTabHelper::OpenTab(
++@@ -186,6 +193,31 @@ base::expected<content::WebContents*, std::string> OpenTabHelper::OpenTab(
 +   // will override this default.
 +   bool active = params.active.value_or(true);
 + 
@@ -255,13 +265,17 @@ index 0000000..19b48e7
 ++  // there.
 ++  // The application is asked about the tab, and may close the window.
 ++  base::WeakPtr<BrowserWindowInterface> weak_browser = browser.GetWeakPtr();
-++  if (content::WebContents* cef_contents =
+++  if (std::optional<content::WebContents*> cef_contents =
 ++          cef::BrowserDelegate::OpenExtensionTab(&browser, validated_url,
 ++                                                 active)) {
-++    if (active) {
-++      cef_contents->SetInitialFocus();
+++    // Opened there and closed again by the application: no other tab.
+++    if (!*cef_contents) {
+++      return base::unexpected(ExtensionTabUtil::kNoCurrentWindowError);
 ++    }
-++    return cef_contents;
+++    if (active) {
+++      (*cef_contents)->SetInitialFocus();
+++    }
+++    return *cef_contents;
 ++  }
 ++  if (!weak_browser) {
 ++    return base::unexpected(ExtensionTabUtil::kNoCurrentWindowError);
