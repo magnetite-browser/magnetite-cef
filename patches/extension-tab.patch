@@ -19,10 +19,18 @@ index e65325e..d4476bf 100644
  
    // Optionally override chrome::AddWebContents behavior. This is most often
 diff --git a/libcef/browser/chrome/chrome_browser_delegate.cc b/libcef/browser/chrome/chrome_browser_delegate.cc
-index 3c4eead..3097995 100644
+index 3c4eead..5964eb0 100644
 --- a/libcef/browser/chrome/chrome_browser_delegate.cc
 +++ b/libcef/browser/chrome/chrome_browser_delegate.cc
-@@ -21,12 +21,18 @@
+@@ -6,6 +6,7 @@
+ 
+ #include <memory>
+ 
++#include "base/memory/weak_ptr.h"
+ #include "cef/libcef/browser/browser_contents_delegate.h"
+ #include "cef/libcef/browser/browser_host_base.h"
+ #include "cef/libcef/browser/browser_info_manager.h"
+@@ -21,12 +22,18 @@
  #include "cef/libcef/browser/views/window_impl.h"
  #include "cef/libcef/common/app_manager.h"
  #include "chrome/browser/profiles/profile.h"
@@ -41,7 +49,7 @@ index 3c4eead..3097995 100644
  
  ChromeBrowserDelegate::ChromeBrowserDelegate(
      Browser* browser,
-@@ -200,6 +206,104 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
+@@ -200,6 +207,111 @@ Browser* ChromeBrowserDelegate::CreateDevToolsBrowser(
    return browser;
  }
  
@@ -124,6 +132,8 @@ index 3c4eead..3097995 100644
 +  std::unique_ptr<content::WebContents> contents =
 +      content::WebContents::Create(contents_params);
 +  content::WebContents* new_contents = contents.get();
++  // The client's callbacks below may close the tab.
++  base::WeakPtr<content::WebContents> weak_contents = contents->GetWeakPtr();
 +
 +  // Create the browser host. Results in the calls to
 +  // CefBrowserViewDelegate::OnPopupBrowserViewCreated and
@@ -136,6 +146,11 @@ index 3c4eead..3097995 100644
 +  // Create a new Browser and give it ownership of the new WebContents.
 +  browser_host->AddNewContents(std::move(contents), std::nullopt);
 +
++  if (!weak_contents) {
++    // Closed by the client meanwhile: there is no tab of ours to return.
++    return nullptr;
++  }
++
 +  content::NavigationController::LoadURLParams load_params(url);
 +  load_params.transition_type = ui::PAGE_TRANSITION_LINK;
 +  new_contents->GetController().LoadURLWithParams(load_params);
@@ -146,7 +161,7 @@ index 3c4eead..3097995 100644
  std::unique_ptr<content::WebContents> ChromeBrowserDelegate::AddWebContents(
      std::unique_ptr<content::WebContents> new_contents) {
    if (CefBrowserInfoManager::GetInstance()->AddWebContents(
-@@ -652,6 +756,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
+@@ -652,6 +764,14 @@ std::unique_ptr<BrowserDelegate> BrowserDelegate::Create(
                                                   opener_browser);
  }
  
