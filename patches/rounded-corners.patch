@@ -1,0 +1,68 @@
+diff --git a/libcef/browser/views/window_impl.cc b/libcef/browser/views/window_impl.cc
+index 008b42056..183c62279 100644
+--- a/libcef/browser/views/window_impl.cc
++++ b/libcef/browser/views/window_impl.cc
+@@ -21,7 +21,9 @@
+ #include "ui/base/mojom/menu_source_type.mojom.h"
+ #include "ui/base/test/ui_controls.h"
+ #include "ui/compositor/compositor.h"
++#include "ui/compositor/layer.h"
+ #include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/controls/button/menu_button.h"
+ #include "ui/views/controls/menu/menu_runner.h"
+ #include "ui/views/controls/webview/webview.h"
+@@ -43,6 +45,12 @@
+ 
+ namespace {
+ 
++#if BUILDFLAG(IS_LINUX)
++// Magnetite: SetThemeColor with this id, which no colour has, takes the
++// radius of the Window's corners instead of a colour.
++constexpr int kCornerRadiusId = -1;
++#endif
++
+ #if BUILDFLAG(IS_OZONE)
+ // Returns true if running on the Wayland platform.
+ bool IsRunningOnWayland() {
+@@ -883,6 +891,20 @@ void CefWindowImpl::RemoveAllAccelerators() {
+ 
+ void CefWindowImpl::SetThemeColor(int color_id, cef_color_t color) {
+   CEF_REQUIRE_VALID_RETURN_VOID();
++#if BUILDFLAG(IS_LINUX)
++  if (color_id == kCornerRadiusId) {
++    // Rounds everything the Window shows, the page's own layers included.
++    // Outside the corners a Window with a parent shows that parent
++    // (CefWindowView::CreateWidget makes it translucent).
++    if (widget_ && widget_->GetLayer()) {
++      ui::Layer* layer = widget_->GetLayer();
++      layer->SetRoundedCornerRadius(
++          gfx::RoundedCornersF(static_cast<float>(color)));
++      layer->SetIsFastRoundedCorner(color != 0);
++    }
++    return;
++  }
++#endif
+   if (root_view()) {
+     view_util::SetColor(root_view(), color_id, color);
+   }
+diff --git a/libcef/browser/views/window_view.cc b/libcef/browser/views/window_view.cc
+index 9c030f0db..240fc5cd0 100644
+--- a/libcef/browser/views/window_view.cc
++++ b/libcef/browser/views/window_view.cc
+@@ -654,6 +654,15 @@ void CefWindowView::CreateWidget(gfx::AcceleratedWidget parent_widget) {
+ 
+   params.delegate->SetCanResize(can_resize);
+ 
++#if BUILDFLAG(IS_LINUX)
++  // Magnetite: a frameless Window with a parent can get round corners
++  // (CefWindowImpl::SetThemeColor), and shows the parent outside them. For
++  // that it is translucent from the start: Views makes it opaque otherwise.
++  if (is_frameless_ && host_widget) {
++    params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
++  }
++#endif
++
+ #if BUILDFLAG(IS_WIN)
+   if (is_frameless_) {
+     // Don't show the native window caption. Setting this value on Linux will
