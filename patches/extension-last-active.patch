@@ -1,0 +1,98 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index f12e668..bf6fe4c 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -66,6 +66,18 @@ patches = [
+     # https://github.com/chromiumembedded/cef/issues/2362
+     'name': 'message_loop',
+   },
++  {
++    # Magnetite: which browser extensions are told is the one activated last
++    # (tabs.query lastFocusedWindow). A browser the application hosts in a
++    # child window painted as active whenever its parent window did, so all
++    # pages turned active in turn and the last of them won. Such a browser
++    # now follows its own window's activation, and an explicit activation
++    # (DevTools Target.activateTarget, chrome.windows.update with focused)
++    # makes it the browser activated last also when it is active already.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_extension_last_active',
++  },
+   {
+     # Add builtin trace event categories for CEF.
+     # Required due to https://crrev.com/331266377d.
+diff --git a/patch/patches/magnetite_extension_last_active.patch b/patch/patches/magnetite_extension_last_active.patch
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/patch/patches/magnetite_extension_last_active.patch
+@@ -0,0 +1,69 @@
++diff --git chrome/browser/ui/views/frame/browser_view.cc chrome/browser/ui/views/frame/browser_view.cc
++--- chrome/browser/ui/views/frame/browser_view.cc
+++++ chrome/browser/ui/views/frame/browser_view.cc
++@@ -1735,11 +1735,17 @@
++     }
++   }
++ 
++-#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_CHROMEOS)
++-  // Update the list managed by `BrowserList` synchronously the same way
++-  // `BrowserView::Show()` does.
++-  BrowserActiveStateManager::From(browser_)->DidBecomeActive();
++-#endif
+++  // Magnetite: update the list managed by `BrowserList` synchronously, on
+++  // every platform, and move this browser to its front even if it counts as
+++  // active already. An explicit Activate() (DevTools Target.activateTarget,
+++  // chrome.windows.update with focused) makes it the browser activated last,
+++  // which tabs.query({lastFocusedWindow}) and windows.getLastFocused report,
+++  // also where the system never activates a child window by itself (Linux).
+++  auto* active_state = BrowserActiveStateManager::From(browser_);
+++  if (active_state->IsActive()) {
+++    active_state->DidBecomeInactive();
+++  }
+++  active_state->DidBecomeActive();
++   browser_widget_->Activate();
++ }
++ 
++@@ -4196,6 +4202,18 @@
++     }
++   }
++ 
+++  // Magnetite: a browser in a child window (CEF hosts an application's pages
+++  // so) is the active one while its own window is, see PaintAsActiveChanged().
+++  // Becoming active moves it to the front of `BrowserList` every time.
+++  if (widget == browser_widget_.get() && browser_widget_->parent() &&
+++      !browser_->IsDeleteScheduled()) {
+++    auto* active_state = BrowserActiveStateManager::From(browser_);
+++    active_state->DidBecomeInactive();
+++    if (active) {
+++      active_state->DidBecomeActive();
+++    }
+++  }
+++
++   ExtensionKeybindingRegistryViews::From(browser_)->OnHostActivationChanged(
++       active);
++ }
++@@ -6087,10 +6105,19 @@
++   // TODO: Unify semantics of "active" between the BrowserList and
++   // BrowserWindowInterface clients. The latter is more accurate definition
++   // where the top level window or any of its child widgets can have focus.
++-  if (is_active) {
++-    BrowserActiveStateManager::From(browser_)->DidBecomeActive();
++-  } else {
++-    BrowserActiveStateManager::From(browser_)->DidBecomeInactive();
+++  // Magnetite: a child window paints as active for as long as its parent
+++  // does. When the parent's state changes, every page of an application
+++  // would turn active one after the other, and the last of them, not the
+++  // page in front, would be the browser activated last
+++  // (tabs.query({lastFocusedWindow}), windows.getLastFocused). A browser in
+++  // a child window follows its own window's activation instead
+++  // (OnWidgetActivationChanged()) and explicit calls of Activate().
+++  if (!browser_widget_->parent()) {
+++    if (is_active) {
+++      BrowserActiveStateManager::From(browser_)->DidBecomeActive();
+++    } else {
+++      BrowserActiveStateManager::From(browser_)->DidBecomeInactive();
+++    }
++   }
++ 
++   if (web_app_frame_toolbar()) {
