@@ -1,15 +1,17 @@
 diff --git a/patch/patch.cfg b/patch/patch.cfg
-index ae004d8..2e6da0d 100644
+index ae004d8..d4ba68f 100644
 --- a/patch/patch.cfg
 +++ b/patch/patch.cfg
-@@ -83,6 +83,14 @@ patches = [
+@@ -83,6 +83,16 @@ patches = [
      # Required due to https://crrev.com/331266377d.
      'name': 'trace_event',
    },
 +  {
-+    # Magnetite: Manifest V2 extensions are not switched off. Chromium blocks
-+    # their install and turns installed ones off in ManifestV2Handler, with
-+    # no switch or policy left to keep them.
++    # Magnetite: Manifest V2 extensions are not switched off, and neither is
++    # an unpacked extension when Developer mode is turned off (Manifest V2
++    # extensions can only be loaded unpacked). Chromium does both in
++    # ManifestV2Handler and ExtensionManagement, with no switch or policy
++    # left to keep them.
 +    # Near the top of the list: CEF adds its own patches at the end, where a
 +    # change of ours stops applying with the next CEF version.
 +    'name': 'magnetite_extension_manifest_v2',
@@ -19,14 +21,31 @@ index ae004d8..2e6da0d 100644
      # https://github.com/chromiumembedded/cef/issues/3714
 diff --git a/patch/patches/magnetite_extension_manifest_v2.patch b/patch/patches/magnetite_extension_manifest_v2.patch
 new file mode 100644
-index 0000000..67456d6
+index 0000000..8a2d07a
 --- /dev/null
 +++ b/patch/patches/magnetite_extension_manifest_v2.patch
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,31 @@
++diff --git chrome/browser/extensions/extension_management.cc chrome/browser/extensions/extension_management.cc
++--- chrome/browser/extensions/extension_management.cc
+++++ chrome/browser/extensions/extension_management.cc
++@@ -450,9 +450,10 @@ bool ExtensionManagement::IsAllowedByUnpackedDeveloperModePolicy(
++     return true;
++   }
++ 
++-  bool in_developer_mode =
++-      profile_->GetPrefs()->GetBoolean(prefs::kExtensionsUIDeveloperMode);
++-  return in_developer_mode;
+++  // Magnetite: an unpacked extension stays on when Developer mode is turned
+++  // off. Manifest V2 extensions can only be loaded unpacked, and turning
+++  // Developer mode off must not switch them off.
+++  return true;
++ }
++ 
++ // static
 +diff --git extensions/browser/manifest_v2_handler.cc extensions/browser/manifest_v2_handler.cc
 +--- extensions/browser/manifest_v2_handler.cc
 ++++ extensions/browser/manifest_v2_handler.cc
-+@@ -114,7 +114,9 @@
++@@ -114,7 +114,9 @@ bool ShouldDisableLegacyExtensions() {
 +     return false;
 +   }
 + 
