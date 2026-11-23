@@ -1,0 +1,53 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index 745594a..17ee49e 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -115,6 +115,14 @@ patches = [
+     # Enable with --enable-blink-features=DocumentPictureInPictureCefOptions.
+     'name': 'webkit_move_pip',
+   },
++  {
++    # Magnetite: DevTools' Extensions.triggerAction answers an error for an
++    # extension the tab's browser has no action for (one that is not
++    # loaded), where it dereferenced a null pointer and ended the program.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_extension_trigger_action',
++  },
+   {
+     # Allow specification of a parent window handle for Widget creation.
+     # https://github.com/chromiumembedded/cef/issues/180
+diff --git a/patch/patches/magnetite_extension_trigger_action.patch b/patch/patches/magnetite_extension_trigger_action.patch
+new file mode 100644
+index 0000000..146e8fb
+--- /dev/null
++++ b/patch/patches/magnetite_extension_trigger_action.patch
+@@ -0,0 +1,28 @@
++diff --git chrome/browser/devtools/protocol/extensions_handler.cc chrome/browser/devtools/protocol/extensions_handler.cc
++--- chrome/browser/devtools/protocol/extensions_handler.cc
+++++ chrome/browser/devtools/protocol/extensions_handler.cc
++@@ -187,12 +187,24 @@ protocol::DispatchResponse ExtensionsHandler::TriggerAction(
++ 
++   BrowserWindowInterface* browser =
++       extensions::browser_window_util::GetBrowserForTabContents(*web_contents);
+++  // Magnetite: an error, not a crash, for a tab without a browser or an id
+++  // this browser has no action for (an extension that is not loaded).
+++  if (browser == nullptr) {
+++    return protocol::Response::ServerError("Tab target has no browser.");
+++  }
++ 
++   ExtensionsContainer* extension_container =
++       ExtensionsContainer::From(*browser);
+++  if (extension_container == nullptr) {
+++    return protocol::Response::ServerError("Browser has no extensions.");
+++  }
++ 
++   ToolbarActionViewModel* extension_model =
++       extension_container->GetActionForId(extension_id);
+++  if (extension_model == nullptr) {
+++    return protocol::Response::ServerError(
+++        "No action for this extension in the tab's browser.");
+++  }
++ 
++   extension_model->ExecuteUserAction(
++       ExtensionActionViewModel::InvocationSource::kCdp);
