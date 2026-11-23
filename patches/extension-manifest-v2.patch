@@ -1,0 +1,39 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index ae004d8..2e6da0d 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -83,6 +83,14 @@ patches = [
+     # Required due to https://crrev.com/331266377d.
+     'name': 'trace_event',
+   },
++  {
++    # Magnetite: Manifest V2 extensions are not switched off. Chromium blocks
++    # their install and turns installed ones off in ManifestV2Handler, with
++    # no switch or policy left to keep them.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_extension_manifest_v2',
++  },
+   {
+     # Enable moveTo()/moveBy() for Document picture-in-picture popups.
+     # https://github.com/chromiumembedded/cef/issues/3714
+diff --git a/patch/patches/magnetite_extension_manifest_v2.patch b/patch/patches/magnetite_extension_manifest_v2.patch
+new file mode 100644
+index 0000000..67456d6
+--- /dev/null
++++ b/patch/patches/magnetite_extension_manifest_v2.patch
+@@ -0,0 +1,14 @@
++diff --git extensions/browser/manifest_v2_handler.cc extensions/browser/manifest_v2_handler.cc
++--- extensions/browser/manifest_v2_handler.cc
+++++ extensions/browser/manifest_v2_handler.cc
++@@ -114,7 +114,9 @@
++     return false;
++   }
++ 
++-  return true;
+++  // Magnetite: Manifest V2 extensions install, turn on and run as they did
+++  // before Chromium switched them off; those it switched off come back on.
+++  return false;
++ }
++ 
++ }  // namespace
