@@ -1,0 +1,63 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index ae004d8..7a6e245 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -83,6 +83,16 @@ patches = [
+     # Required due to https://crrev.com/331266377d.
+     'name': 'trace_event',
+   },
++  {
++    # Magnetite: Manifest V2 extensions are not switched off. With
++    # --magnetite-keep-unpacked-extensions neither is an unpacked extension
++    # when Developer mode is off (Manifest V2 extensions can only be loaded
++    # unpacked). Chromium does both in ManifestV2Handler and
++    # ExtensionManagement, with no switch or policy left to keep them.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_extension_manifest_v2',
++  },
+   {
+     # Enable moveTo()/moveBy() for Document picture-in-picture popups.
+     # https://github.com/chromiumembedded/cef/issues/3714
+diff --git a/patch/patches/magnetite_extension_manifest_v2.patch b/patch/patches/magnetite_extension_manifest_v2.patch
+new file mode 100644
+index 0000000..e0f7a4a
+--- /dev/null
++++ b/patch/patches/magnetite_extension_manifest_v2.patch
+@@ -0,0 +1,36 @@
++diff --git chrome/browser/extensions/extension_management.cc chrome/browser/extensions/extension_management.cc
++--- chrome/browser/extensions/extension_management.cc
+++++ chrome/browser/extensions/extension_management.cc
++@@ -450,6 +450,17 @@ bool ExtensionManagement::IsAllowedByUnpackedDeveloperModePolicy(
++     return true;
++   }
++ 
+++  // Magnetite: started with --magnetite-keep-unpacked-extensions (the
+++  // application's setting for it), an unpacked extension stays on when
+++  // Developer mode is off, and the header's description does not hold.
+++  // Manifest V2 extensions can only be loaded unpacked. Off by default: it
+++  // also keeps on an unpacked extension that another program put into the
+++  // profile.
+++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+++          "magnetite-keep-unpacked-extensions")) {
+++    return true;
+++  }
+++
++   bool in_developer_mode =
++       profile_->GetPrefs()->GetBoolean(prefs::kExtensionsUIDeveloperMode);
++   return in_developer_mode;
++diff --git extensions/browser/manifest_v2_handler.cc extensions/browser/manifest_v2_handler.cc
++--- extensions/browser/manifest_v2_handler.cc
+++++ extensions/browser/manifest_v2_handler.cc
++@@ -114,7 +114,10 @@ bool ShouldDisableLegacyExtensions() {
++     return false;
++   }
++ 
++-  return true;
+++  // Magnetite: Manifest V2 extensions install, turn on and run as they did
+++  // before Chromium switched them off; those it switched off come back on.
+++  // The testing switch above no longer changes anything.
+++  return false;
++ }
++ 
++ }  // namespace
