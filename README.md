@@ -39,8 +39,12 @@ the same version gets a revision, `156.0.15-2`), with:
 
 - `cef_binary_<version>_macosarm64_minimal.tar.bz2`: the minimal distribution
   for macOS on Apple silicon, laid out like the official one on CEF's CDN;
+- `cef_binary_<version>_macosx64_minimal.tar.bz2`: the same for macOS on
+  Intel;
 - `cef_binary_<version>_linux64_minimal.tar.bz2`: the same for Linux on
   x86_64;
+- `cef_binary_<version>_linuxarm64_minimal.tar.bz2`: the same for Linux on
+  arm64;
 - `cef_binary_<version>_windows64_minimal.tar.bz2`: the same for Windows on
   x86_64, with one difference ("Windows, built on Linux");
 - each one's SHA-256 (`.sha256`);
@@ -93,12 +97,13 @@ follow first. The release notes say which Chromium version CEF was made for.
 The run then waits for approval: its jobs start once a reviewer of the
 environment `build` (Settings → Environments) approved it on the run's page.
 
-It builds the three platforms, each in one job on a machine of our own
-(below; Windows on the Linux machine, after or before the Linux build), and
-publishes one release once all are done. A failed platform holds the release
-back. A platform's tree (Chromium with its git history,
-CEF, the build output) stays on its machine, so a run does only what changed
-since the last one:
+It builds the five platforms, each in one job on a machine of our own
+(below; macOS on Intel on the Mac after macOS on Apple silicon, Linux on
+arm64 on the Linux machine after Linux on x86_64, and Windows there after or
+before them), and publishes one release once all are done. A failed
+platform holds the release back. A platform's tree (Chromium with its git
+history, CEF, the build output) stays on its machine, so a run does only
+what changed since the last one:
 
 - The same version again, with other patches: the patched files are built
   again, the rest is kept.
@@ -138,7 +143,9 @@ Before building, it checks that GN resolved the codec args as intended.
 
 The same build without the workflow, for the machine it runs on: a Mac with
 Apple silicon or Linux on x86_64. On a MacBook Pro with an M4 Pro (14 cores)
-a build of everything took 87 minutes.
+a build of everything took 87 minutes. With `CEF_TARGET` it builds for
+another platform instead: `macosx64` on the Mac, `linuxarm64` or `windows64`
+on Linux (the sections below).
 
 It needs about 200 GB of free disk, `git`, `curl` and `python3`, and, to
 publish, `gh` signed in with write access to this repository. On a Mac,
@@ -160,8 +167,9 @@ tools/build-cef.sh publish-local      # create the release
   checkout to be `main` as it is on GitHub, with nothing changed, because
   the release notes name the commit. Another build of a released version
   needs a revision (`export CEF_REVISION=2`), as with the workflow. It
-  releases only this machine's platform, and a release cannot take files
-  later: prefer the workflow, which releases both.
+  releases every archive in `CEF_WORK/cef-distrib`, which on a machine that
+  builds two platforms (below) can be an older one's, and a release cannot
+  take files later: prefer the workflow, which releases all of them.
 
 Build releases only on a machine you would trust with Magnetite's signing
 key: what it builds ends up in every Magnetite release.
@@ -186,8 +194,8 @@ GitHub's:
    (`~/cef-windows64`, another 200 GB), builds with `target_os="win"` and
    makes the distribution.
 3. **check-windows**, on GitHub's Windows runner: loads the distribution's
-   `libcef.dll`; without that there is no release. Whether CEF works, only
-   Magnetite shows.
+   `libcef.dll` (`tools/build-cef.sh check`); without that there is no
+   release. Whether CEF works, only Magnetite shows.
 
 It needs:
 
@@ -201,8 +209,8 @@ It needs:
   enough): Chromium mounts the Windows SDK in a folder that ignores case.
 
 CEF's tools take the platform from the machine they run on.
-`patches/cross/host-is-not-the-target.patch`, applied in a cross build only,
-lets `tools/build-cef.sh` name it instead; with it CEF writes the GN args it
+`patches/cross/host-is-not-the-target.patch`, applied in the build for
+Windows only, lets `tools/build-cef.sh` name it instead; with it CEF writes the GN args it
 writes on Windows. The archive's patch list leaves it out.
 
 Those args (CDM host verification, the CDM's storage ID, RLZ) are for Windows
@@ -210,7 +218,8 @@ and macOS only, and GN gives them to the toolchain of the building machine
 too, where Chromium refuses them. `patches/cross/host-toolchain-args.patch`
 switches them off there, as Chromium's own defaults do.
 
-A cross build has no V8 context snapshot, so the installer's archive takes
+A build for Windows on Linux has no V8 context snapshot (Chromium leaves it
+out of a build for another system), so the installer's archive takes
 V8's plain snapshot as an input without naming the target that makes it, and
 GN stops. `patches/cross/installer-snapshot-dep.patch` names it, as later
 Chromium versions do.
@@ -230,6 +239,39 @@ Known or open:
   `~/cef-windows64-toolchain/<toolchain hash>/`:
   `CEF_TARGET=windows64 tools/build-cef.sh local`.
 
+## Intel Macs and Linux on arm64
+
+The workflow builds CEF for macOS on Intel on our Mac and for Linux on arm64
+on our Linux runner, with Chromium's cross build for another architecture of
+the same system, as CEF's official builds for these platforms are made
+(`docs/automated_build_setup.md` in CEF). CEF's tools support both, so they
+need no patch of their own:
+
+- macOS on Intel (`CEF_TARGET=macosx64`): `CEF_ENABLE_AMD64` lets CEF
+  configure a build for x64 on Apple silicon. It needs no Rosetta
+  (`docs/mac_arm64.md` in Chromium).
+- Linux on arm64 (`CEF_TARGET=linuxarm64`): CEF installs Chromium's Debian
+  sysroot for arm64 next to the one for x86_64, which the build's own tools
+  use. As in CEF's official builds for it, without ThinLTO and PGO
+  (`use_thin_lto=false chrome_pgo_phase=0`).
+
+Each shares the tree of its machine's own build: one checkout, with a build
+output of its own (`out/Release_GN_x64` on the Mac, `out/Release_GN_arm64`
+on Linux), so the machine needs room for a second build output, not a
+second tree. Its job runs after the machine's own build and does not take
+"fresh", which that job has done for the tree already. An update of the tree
+is done once; each build output is configured again after it
+(`magnetite-configured` in the output marks one that is).
+
+Before the release, `tools/build-cef.sh check` loads each archive's library
+on GitHub's runner for its platform (`macos-15-intel`, `ubuntu-24.04-arm`),
+as for Windows; without that there is no release.
+
+By hand, with the `CEF_WORK` of the machine's own build:
+`CEF_TARGET=macosx64 tools/build-cef.sh local` on the Mac,
+`CEF_TARGET=linuxarm64 tools/build-cef.sh local` on Linux. `CEF_FRESH=true`
+deletes the tree both builds share.
+
 ## Our own machines as runners
 
 ### Linux
@@ -237,7 +279,8 @@ Known or open:
 The workflow's Linux build runs on a self-hosted runner with the default
 labels `self-hosted`, `Linux`, `X64`. The machine needs what a build on a
 machine of our own needs (above): `git`, `curl`, `python3`, `pkg-config`,
-and 200 GB free in the runner user's home, where the tree stays (`~/cef`).
+and 200 GB free in the runner user's home, where the tree stays (`~/cef`),
+plus room for the build for arm64 in it.
 Chromium's toolchain and sysroot come with the checkout; nothing else is
 installed.
 
