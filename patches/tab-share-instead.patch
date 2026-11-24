@@ -1,0 +1,79 @@
+diff --git a/libcef/browser/frame_host_impl.cc b/libcef/browser/frame_host_impl.cc
+index 26d5616..a08b690 100644
+--- a/libcef/browser/frame_host_impl.cc
++++ b/libcef/browser/frame_host_impl.cc
+@@ -17,6 +17,9 @@
+ #include "cef/libcef/common/request_impl.h"
+ #include "cef/libcef/common/string_util.h"
+ #include "cef/libcef/common/task_runner_impl.h"
++#include "chrome/browser/ui/tab_sharing/tab_sharing_infobar_delegate.h"
++#include "components/infobars/content/content_infobar_manager.h"
++#include "components/infobars/core/infobar.h"
+ #include "content/browser/renderer_host/frame_tree_node.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/render_process_host.h"
+@@ -74,6 +77,42 @@ void ExecWebContentsCommand(CefFrameHostImpl* fh,
+   ExecWebContentsCommand(this, &CefFrameHostImpl::name, \
+                          &content::WebContents::name, #name);
+ 
++// Magnetite: the message a client sends to the browser process on a frame of
++// a browser (`CefFrame::SendProcessMessage` with `PID_BROWSER`, which CEF
++// does not take otherwise) to share that browser's tab in place of the tab a
++// page shares now. It has no arguments.
++constexpr char kShareTabInsteadMessage[] = "magnetite.share-tab-instead";
++
++// Share `web_contents` in place of the tab a page shares now, as the "Share
++// this tab instead" button of Chrome's tab-sharing infobar on it does. While
++// a page shares a tab, Chrome puts that infobar on every tab of the page's
++// profile, with the button only where switching is possible and allowed:
++// not on the shared tab, not on the capturing tab unless the page asked for
++// its own tab, nowhere if the page asked for no switching. Without such a
++// button nothing happens.
++void ShareTabInstead(content::WebContents* web_contents) {
++  auto* manager =
++      infobars::ContentInfoBarManager::FromWebContents(web_contents);
++  if (!manager) {
++    return;
++  }
++  constexpr auto kButton = TabSharingInfoBarDelegate::kShareThisTabInstead;
++  for (infobars::InfoBar* infobar : manager->infobars()) {
++    if (infobar->delegate()->GetIdentifier() !=
++        infobars::InfoBarDelegate::TAB_SHARING_INFOBAR_DELEGATE) {
++      continue;
++    }
++    auto* sharing =
++        static_cast<TabSharingInfoBarDelegate*>(infobar->delegate());
++    if ((sharing->GetButtons() & kButton) &&
++        sharing->IsButtonEnabled(kButton)) {
++      // The switch replaces the infobars: none is touched after this.
++      sharing->ShareThisTabInstead();
++      return;
++    }
++  }
++}
++
+ }  // namespace
+ 
+ CefFrameHostImpl::CefFrameHostImpl(
+@@ -272,6 +311,21 @@ CefRefPtr<CefURLRequest> CefFrameHostImpl::CreateURLRequest(
+ void CefFrameHostImpl::SendProcessMessage(
+     CefProcessId target_process,
+     CefRefPtr<CefProcessMessage> message) {
++  // Magnetite: a request of the client to the browser process. Handled on
++  // the UI thread after the call returns, so the client is not called back
++  // from inside it.
++  if (target_process == PID_BROWSER && message && message->IsValid() &&
++      message->GetName().ToString() == kShareTabInsteadMessage) {
++    CEF_POST_TASK(CEF_UIT, base::BindOnce(
++                               [](CefRefPtr<CefBrowserHostBase> browser) {
++                                 if (browser && browser->GetWebContents()) {
++                                   ShareTabInstead(browser->GetWebContents());
++                                 }
++                               },
++                               GetBrowserHostBase()));
++    return;
++  }
++
+   DCHECK_EQ(PID_RENDERER, target_process);
+   DCHECK(message && message->IsValid());
+   if (!message || !message->IsValid()) {
