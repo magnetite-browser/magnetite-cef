@@ -8,19 +8,26 @@
 #   release-state           is the release made already (a re-run)?
 #   publish                 create the release with every platform's archive
 #
-# With CEF_TARGET=windows64 on Linux, `local` builds for Windows on x86_64
-# (windows64) instead, in a tree of its own (README, "Windows, built on
-# Linux"). It has three stages of its own:
+# With CEF_TARGET, `local` builds for another platform instead, with
+# Chromium's cross build:
 #
+#   macosx64     macOS on Intel, on the Mac, in the same tree (README, "Intel
+#                Macs and Linux on arm64")
+#   linuxarm64   Linux on arm64, on Linux, in the same tree (same section)
+#   windows64    Windows on x86_64, on Linux, in a tree of its own (README,
+#                "Windows, built on Linux")
+#
+# Their stages on other machines:
+#
+#   check                   on the machine the archive is for: does it load?
 #   win-toolchain           on Windows: package Visual Studio and the SDK
 #   win-toolchain-unpack    on Linux: take that package into the tree's folder
-#   win-check               on Windows: does the archive's libcef.dll load?
 #
-# .github/workflows/build.yml runs `local` on our own runners, one per
-# platform, the Windows stages around the Windows build, and the last two in
-# its publish job. On a machine of your own, `local` and `publish-local`
-# do the same without the workflow (README, "Building on a machine of our
-# own").
+# .github/workflows/build.yml runs `local` on our own runners, one job per
+# platform, `check` and the Windows stages around the cross builds, and the
+# last two in its publish job. On a machine of your own, `local` and
+# `publish-local` do the same without the workflow (README, "Building on a
+# machine of our own").
 #
 # Settings come from the environment: CEF_VERSION (required), CEF_REVISION,
 # DEPOT_TOOLS_COMMIT, CEF_WORK for the folder to build in (default ~/cef, for
@@ -63,28 +70,45 @@ DEPOT_TOOLS_COMMIT="${DEPOT_TOOLS_COMMIT:-132599ebbd8d22d1b1bd5ea703a6d3bc493edd
 #   PLATFORM     the archive's platform name
 #   TARGETS      what ninja builds; make_distrib.py takes the files from them
 #   PLATFORM_GN  GN args of CEF's official builds for the platform
-#                (AutomatedBuildSetup in CEF's wiki): on Linux, Chromium's
+#                (docs/automated_build_setup.md in CEF): on Linux, Chromium's
 #                Debian sysroot instead of the host's libraries, and no CFI.
+#   SYSROOTS     on Linux, the sysroots CEF installs (CEF_INSTALL_SYSROOT):
+#                the platform's, and in a cross build the build machine's
+#                for its own tools.
+#   CROSS_OS     GN's target_os for a build for another operating system
+#                (Windows), which needs a tree of its own; empty otherwise.
 OS="$(uname -s)"
 CEF_TARGET="${CEF_TARGET:-}"
+SYSROOTS="" CROSS_OS=""
 case "$OS-$(uname -m):$CEF_TARGET" in
   Darwin-arm64:)
     ARCH=arm64 PLATFORM=macosarm64 TARGETS=cefclient PLATFORM_GN=""
     ;;
+  # macOS on Intel: the build on Apple silicon, which needs no Rosetta
+  # (Chromium's docs/mac_arm64.md); `check` on an Intel Mac.
+  Darwin-arm64:macosx64 | Darwin-x86_64:macosx64)
+    ARCH=x64 PLATFORM=macosx64 TARGETS=cefclient PLATFORM_GN=""
+    ;;
   Linux-x86_64:)
     # Not cefclient: it needs GTK's headers, which CEF leaves out with
     # use_sysroot=true, and the distribution takes nothing from it.
-    ARCH=x64 PLATFORM=linux64 TARGETS="libcef chrome_sandbox"
+    ARCH=x64 PLATFORM=linux64 TARGETS="libcef chrome_sandbox" SYSROOTS=x64
     PLATFORM_GN="use_sysroot=true is_cfi=false"
     ;;
+  # Linux on arm64: the build on x86_64; `check` on arm64. CEF's official
+  # builds for it also leave out ThinLTO and PGO.
+  Linux-x86_64:linuxarm64 | Linux-aarch64:linuxarm64)
+    ARCH=arm64 PLATFORM=linuxarm64 TARGETS="libcef chrome_sandbox" SYSROOTS=x64,arm64
+    PLATFORM_GN="use_sysroot=true is_cfi=false use_thin_lto=false chrome_pgo_phase=0"
+    ;;
   # Windows: on Linux the build; under Git Bash on Windows only
-  # win-toolchain and win-check.
+  # win-toolchain and check.
   Linux-x86_64:windows64 | MINGW*-x86_64:windows64)
     # The targets of CEF's official builds (automate-git.py).
     ARCH=x64 PLATFORM=windows64 TARGETS="cefclient bootstrap bootstrapc"
     # Chromium's cross build (docs/win_cross.md). Its tools for the build
     # machine use the Debian sysroot, GN's default.
-    PLATFORM_GN="target_os=win"
+    PLATFORM_GN="target_os=win" CROSS_OS=win
     # CEF's tools take the platform from the machine they run on; with
     # patches/cross/ they take it from here.
     export MAGNETITE_TARGET_PLATFORM=windows
@@ -96,15 +120,18 @@ case "$OS-$(uname -m):$CEF_TARGET" in
     WIN_SDK_SHA256=e8e264aca8bc34abdf592352bf09f986a85cdb96db0efba405ca9e149181fe61
     ;;
   *)
-    echo "::error::This builds CEF on macOS on Apple silicon or Linux on x86_64 (with CEF_TARGET=windows64: for Windows), not $OS $(uname -m) with CEF_TARGET='$CEF_TARGET'." >&2
+    echo "::error::This builds CEF on macOS on Apple silicon or Linux on x86_64 (with CEF_TARGET: for macosx64 on the Mac, linuxarm64 or windows64 on Linux), not $OS $(uname -m) with CEF_TARGET='$CEF_TARGET'." >&2
     exit 1
     ;;
 esac
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # The tree: depot_tools, Chromium with CEF in it, and the build output. It
-# stays between builds, so the next one only does what changed.
-WORK="${CEF_WORK:-$HOME/cef${CEF_TARGET:+-$CEF_TARGET}}"
+# stays between builds, so the next one only does what changed. A build for
+# another architecture of the same system shares it, with a build output of
+# its own (out/Release_GN_<arch>); one for another system needs a checkout of
+# its own.
+WORK="${CEF_WORK:-$HOME/cef${CROSS_OS:+-$CEF_TARGET}}"
 # Git Bash gets the runner's folders as Windows paths; tar takes "D:" for a
 # machine's name.
 if [[ "$OS" == MINGW* && -n "${RUNNER_TEMP:-}" ]]; then
@@ -114,9 +141,10 @@ fi
 # <the toolchain Chromium asks for>/<the package's hash>.zip. Next to the
 # tree, so CEF_FRESH leaves it.
 WIN_TOOLCHAIN="$WORK-toolchain"
-# patches/ and, for a cross build, the changes to CEF's tools on top.
+# patches/ and, for a build for another system, the changes to CEF's tools
+# on top.
 PATCHES=("$REPO_DIR"/patches/*.patch)
-if [[ -n "$CEF_TARGET" ]]; then PATCHES+=("$REPO_DIR"/patches/cross/*.patch); fi
+if [[ -n "$CROSS_OS" ]]; then PATCHES+=("$REPO_DIR"/patches/cross/*.patch); fi
 SRC="$WORK/chromium/src"
 OUT="$SRC/out/Release_GN_$ARCH"
 NINJA="$SRC/third_party/ninja/ninja"
@@ -152,10 +180,10 @@ free_gb() {
 
 host_os() {
   if [[ "$OS" == Darwin ]]; then
-    echo "macOS $(sw_vers -productVersion)"
+    echo "macOS $(sw_vers -productVersion), $(uname -m)"
   else
     # shellcheck disable=SC1091
-    (. /etc/os-release && echo "$PRETTY_NAME, Linux $(uname -r)")
+    (. /etc/os-release && echo "$PRETTY_NAME, Linux $(uname -r), $(uname -m)")
   fi
 }
 
@@ -197,16 +225,18 @@ ffmpeg_branding = "Chrome"
 media_use_openh264 = true
 rtc_use_h264 = true'
 
-# Brings the tree in WORK to CEF_VERSION with patches/ applied, and
-# configures it. The first time that is a full checkout of Chromium with its
-# git history, which an update needs. After that it is an update in place:
-# git rewrites only the files that differ between the versions, and ninja
-# builds only what depends on them.
+# Brings the tree in WORK to CEF_VERSION with patches/ applied. The first
+# time that is a full checkout of Chromium with its git history, which an
+# update needs. After that it is an update in place: git rewrites only the
+# files that differ between the versions, and ninja builds only what depends
+# on them. configure comes after it, for each platform that builds in the
+# tree.
 sync() {
   echo "CEF $CEF_VERSION: branch $CEF_BRANCH, commit $CEF_COMMIT"
   mkdir -p "$WORK"
-  # From here to the end the tree is in no state to build from.
-  rm -f "$WORK/patches-applied"
+  # From here to the end the tree is in no state to build from, and no
+  # build output in it is configured for what it will be.
+  rm -f "$WORK/patches-applied" "$SRC"/out/*/magnetite-configured
   # The commit's own checkout tool, not the branch's newest.
   curl -fsSL -o "$WORK/automate-git.orig.py" \
     "https://raw.githubusercontent.com/chromiumembedded/cef/$CEF_COMMIT/tools/automate/automate-git.py"
@@ -216,14 +246,15 @@ sync() {
   local hooks='  run("gclient runhooks", chromium_dir)'
   [[ "$(grep -cxF -- "$hooks" "$WORK/automate-git.orig.py")" == 1 ]] ||
     fail "automate-git.py has changed: no single line '$hooks' to fix it at (issue #6)"
-  # A cross build's .gclient also names the platform it is for, so gclient
-  # fetches what a build for Windows needs (Chromium's docs/win_cross.md).
-  # The tool writes the file once, with the first checkout.
+  # The .gclient of a build for another system also names that system, so
+  # gclient fetches what a build for Windows needs (Chromium's
+  # docs/win_cross.md). The tool writes the file once, with the first
+  # checkout.
   local gclient='      "}]"'
-  [[ -z "$CEF_TARGET" || "$(grep -cxF -- "$gclient" "$WORK/automate-git.orig.py")" == 1 ]] ||
+  [[ -z "$CROSS_OS" || "$(grep -cxF -- "$gclient" "$WORK/automate-git.orig.py")" == 1 ]] ||
     fail "automate-git.py has changed: no single line '$gclient' to end .gclient at"
-  GCLIENT_END="      \"}]\\ntarget_os = ['win']\"" awk -v hooks="$hooks" \
-    -v gclient="$gclient" -v cross="$CEF_TARGET" '
+  GCLIENT_END="      \"}]\\ntarget_os = ['$CROSS_OS']\"" awk -v hooks="$hooks" \
+    -v gclient="$gclient" -v cross="$CROSS_OS" '
     cross != "" && $0 == gclient { print ENVIRON["GCLIENT_END"]; next }
     { print }
     $0 == hooks {
@@ -244,7 +275,7 @@ sync() {
     bootstrap_python3
   )
   use_depot_tools
-  if [[ -n "$CEF_TARGET" ]]; then
+  if [[ -n "$CROSS_OS" ]]; then
     # Chromium's hooks unpack the toolchain; the tree may still be another
     # version's, or not there.
     fetch_vs_toolchain
@@ -303,8 +334,8 @@ sync() {
   # The first checkout clones CEF there and copies it to src/cef; build
   # output of other branches is parked there.
   rm -rf "$WORK/cef" "$WORK"/out_*
-  [[ -z "$CEF_TARGET" ]] || grep -q target_os "$WORK/chromium/.gclient" ||
-    fail "$WORK/chromium/.gclient names no target_os: the tree was not checked out for a cross build. Build with CEF_FRESH=true."
+  [[ -z "$CROSS_OS" ]] || grep -q target_os "$WORK/chromium/.gclient" ||
+    fail "$WORK/chromium/.gclient names no target_os: the tree was not checked out for a build for $CROSS_OS. Build with CEF_FRESH=true."
 
   # The version is computed from git, as make_distrib.py will do; it names
   # the archive, so a mismatch is better found now than after the build.
@@ -325,30 +356,37 @@ sync() {
     git -C "$SRC/cef" apply "$patch" || fail "$(basename "$patch") does not apply to CEF $CEF_VERSION."
   done
 
-  if [[ -n "$CEF_TARGET" ]]; then
+  patches_hash > "$WORK/patches-applied"
+}
+
+# What automate-git.py does before it builds, for this platform's build
+# output only (out/Release_GN_<arch>): translate CEF's API files, apply CEF's
+# patches to Chromium (those already there are skipped), write args.gn and
+# run gn gen. On Linux it also installs SYSROOTS; without the platform's,
+# gn_args.py has no configuration to generate. CEF_ENABLE_* let it generate
+# one for either architecture on either Mac. Each platform that builds in the
+# tree does this once after sync.
+configure() {
+  use_depot_tools
+  if [[ -n "$CROSS_OS" ]]; then
     # GN reads the SDK, and the hooks that mount it ran only if the Chromium
     # version changed.
+    use_win_toolchain "$SRC/build/vs_toolchain.py"
     mount_win_toolchain
   fi
-
-  # What automate-git.py does before it builds: translate CEF's API files,
-  # apply CEF's patches to Chromium (those already there are skipped), write
-  # args.gn and run gn gen. Only the Release configuration of this machine's
-  # architecture. On Linux it also installs the sysroot (CEF_INSTALL_SYSROOT);
-  # without it, gn_args.py has no configuration to generate.
   (cd "$SRC/cef" && GN_DEFINES="$(gn_defines)" GN_OUT_CONFIGS="Release_GN_$ARCH" \
-    CEF_ENABLE_ARM64=1 CEF_INSTALL_SYSROOT="$ARCH" python3 tools/gclient_hook.py)
+    CEF_ENABLE_ARM64=1 CEF_ENABLE_AMD64=1 CEF_INSTALL_SYSROOT="$SYSROOTS" \
+    python3 tools/gclient_hook.py)
   cat "$OUT/args.gn"
   check_args
-
-  patches_hash > "$WORK/patches-applied"
+  gn_defines > "$OUT/magnetite-configured"
   echo "Disk: $(disk)"
 }
 
-# One hash over PATCHES and the GN args: what a tree was made and configured
-# with. A tree kept from a build with other args is configured again.
+# One hash over PATCHES: what a tree was made with. A tree kept from a build
+# with other patches is updated again.
 patches_hash() {
-  { cat "${PATCHES[@]}" && gn_defines; } | sha256 | cut -d' ' -f1
+  cat "${PATCHES[@]}" | sha256 | cut -d' ' -f1
 }
 
 # depot_tools in WORK at DEPOT_TOOLS_COMMIT.
@@ -407,8 +445,10 @@ check_args() {
   echo "$actual"
   [[ "$actual" == "$EXPECTED_ARGS" ]] ||
     fail "GN resolved the codec args differently (above); expected: $(echo "$EXPECTED_ARGS" | tr '\n' ';')"
-  [[ -z "$CEF_TARGET" || "$(cd "$SRC" && gn args "$OUT" --short --list=target_os)" == 'target_os = "win"' ]] ||
-    fail "GN did not configure a build for Windows."
+  [[ "$(cd "$SRC" && gn args "$OUT" --short --list=target_cpu)" == "target_cpu = \"$ARCH\"" ]] ||
+    fail "GN did not configure a build for $ARCH."
+  [[ -z "$CROSS_OS" || "$(cd "$SRC" && gn args "$OUT" --short --list=target_os)" == "target_os = \"$CROSS_OS\"" ]] ||
+    fail "GN did not configure a build for $CROSS_OS."
 }
 
 # Builds TARGETS, which make_distrib.py takes the files from. Ninja
@@ -420,7 +460,7 @@ build() {
   # Chromium's own Python. /usr/bin/python3 asks xcodebuild for one, and
   # Xcode 27 rejects the SDK link that rustc passes it in SDKROOT.
   export PATH="$SRC/third_party/cpython3/host/bin:$PATH"
-  if [[ -n "$CEF_TARGET" ]]; then
+  if [[ -n "$CROSS_OS" ]]; then
     use_win_toolchain "$SRC/build/vs_toolchain.py"
     mount_win_toolchain
   fi
@@ -460,7 +500,7 @@ distrib() {
       tr '\n' ' ' < "$WORK/xcode-version"
       echo
     fi
-    if [[ -n "$CEF_TARGET" ]]; then
+    if [[ -n "$CROSS_OS" ]]; then
       echo "built on Linux with Visual Studio and Windows SDK package $(basename "$WIN_TOOLCHAIN"/*/*.zip .zip)"
     fi
     if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
@@ -508,20 +548,29 @@ release_state() {
   output state=published
 }
 
-# Is the tree in WORK this version with these patches, configured? Then
-# there is nothing to check out, only to build.
+# Is the tree in WORK this version with these patches? Then there is nothing
+# to check out.
 tree_is_current() {
-  [[ -f "$OUT/args.gn" ]] || return 1
   [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] || return 1
   [[ "$(use_depot_tools && python3 "$SRC/cef/tools/cef_version.py" current)" == "$CEF_VERSION" ]]
 }
 
+# Is this platform's build output configured for the tree as it is, with
+# these GN args? sync takes the mark away from every platform's output.
+is_configured() {
+  [[ -f "$OUT/args.gn" && "$(cat "$OUT/magnetite-configured" 2> /dev/null)" == "$(gn_defines)" ]]
+}
+
 # The whole build: checks out or updates the tree unless it is this version
-# already, builds and makes the distribution. Run again after an
-# interruption, it carries on where it stopped.
+# already, configures this platform's build output, builds and makes the
+# distribution. Run again after an interruption, it carries on where it
+# stopped.
 local_build() {
-  [[ "$OS" != MINGW* ]] || fail "The build for Windows runs on Linux; Windows does win-toolchain and win-check."
-  if [[ -n "$CEF_TARGET" ]]; then
+  case "$OS-$(uname -m)" in
+    Darwin-arm64 | Linux-x86_64) ;;
+    *) fail "The builds run on macOS on Apple silicon or Linux on x86_64; here this script only does check and win-toolchain." ;;
+  esac
+  if [[ -n "$CROSS_OS" ]]; then
     # Chromium mounts the Windows SDK with ciopfs, which it brings along. It
     # is linked against FUSE 2's library; fusermount alone can be FUSE 3's.
     # Checked here, as the mount comes only after the hours of checkout.
@@ -539,13 +588,13 @@ local_build() {
     command -v pkg-config > /dev/null || fail "pkg-config is missing (the package pkgconf or pkg-config)."
   fi
   if [[ "${CEF_FRESH:-}" == true ]]; then
-    # A cross build leaves the Windows SDK mounted in the tree (ciopfs, in
+    # The build for Windows leaves its SDK mounted in the tree (ciopfs, in
     # the depot_tools Chromium brings along), which rm cannot delete.
     # Looked for in its parent's listing: a mount whose ciopfs died cannot be
     # looked at itself, but is listed. (Read whole first: grep -q stopping
     # early would fail the pipe.)
     local sdk="$SRC/third_party/depot_tools/win_toolchain/vs_files" mounted=0 listing=""
-    if [[ -n "$CEF_TARGET" && -d "$(dirname "$sdk")" ]]; then
+    if [[ -n "$CROSS_OS" && -d "$(dirname "$sdk")" ]]; then
       listing="$(ls -A "$(dirname "$sdk")")" ||
         fail "Cannot list $(dirname "$sdk") to look for the Windows SDK's mount. Make it readable or unmount the SDK (fusermount -u $sdk), then build with CEF_FRESH=true again."
     fi
@@ -590,9 +639,16 @@ local_build() {
   else
     sync
   fi
+  if is_configured; then
+    echo "$OUT is configured already"
+  else
+    configure
+  fi
   build
   distrib
   echo "Made $DIST_DIR/$PLATFORM/$DIST_NAME.tar.bz2."
+  # The workflow names the uploaded files after it.
+  output "platform=$PLATFORM"
 }
 
 # On Windows with Visual Studio 2026 (GitHub's runner): packages it and the
@@ -677,21 +733,32 @@ win_toolchain_unpack() {
   done
 }
 
-# On Windows: the archive local made is whole, and Windows loads its
-# libcef.dll (a 64-bit library whose imports all resolve). Whether CEF works
-# only Magnetite shows.
-win_check() {
-  [[ "$OS" == MINGW* ]] || fail "win-check runs on Windows, under Git Bash."
-  local dist="$DIST_DIR/$PLATFORM" out="$WORK/check"
+# On the machine a cross build is for (GitHub's runners): the archive local
+# made is whole, and the system loads its library, which needs the library to
+# be for this architecture and every library it links against to be found.
+# Whether CEF works only Magnetite shows.
+check() {
+  case "$OS-$(uname -m)" in
+    Darwin-arm64 | Linux-x86_64) fail "check runs on the machine a cross build (CEF_TARGET) is for, not on $OS $(uname -m)." ;;
+  esac
+  local dist="$DIST_DIR/$PLATFORM" out="$WORK/check" release lib name python=python3
   (cd "$dist" && sha256 -c "$DIST_NAME.tar.bz2.sha256")
   rm -rf "$out"
   mkdir -p "$out"
   tar -C "$out" -xjf "$dist/$DIST_NAME.tar.bz2"
-  ls -lh "$out/$DIST_NAME/Release"
-  python -c 'import ctypes, sys; ctypes.WinDLL(sys.argv[1])' \
-    "$(cygpath -w "$out/$DIST_NAME/Release/libcef.dll")" ||
-    fail "Windows does not load libcef.dll."
-  echo "Windows loads libcef.dll."
+  release="$out/$DIST_NAME/Release"
+  ls -lh "$release"
+  case "$PLATFORM" in
+    macosx64) lib="$release/Chromium Embedded Framework.framework/Chromium Embedded Framework" ;;
+    linuxarm64) lib="$release/libcef.so" ;;
+    windows64) lib="$release/libcef.dll" ;;
+  esac
+  name="$(basename "$lib")"
+  # Git Bash's Python is Windows', which takes Windows paths.
+  if [[ "$OS" == MINGW* ]]; then lib="$(cygpath -w "$lib")" python=python; fi
+  "$python" -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$lib" ||
+    fail "This $PLATFORM machine does not load $name."
+  echo "This $PLATFORM machine loads $name."
 }
 
 # Publishes what local made, from this machine: gh must be signed in with
@@ -704,7 +771,7 @@ publish_local() {
   GITHUB_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
   [[ "$GITHUB_SHA" == "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" ]] ||
     fail "This checkout is not at origin's main; the release would name a commit nobody can see there."
-  [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] ||
+  { [[ "$(cat "$WORK/patches-applied" 2> /dev/null)" == "$(patches_hash)" ]] && is_configured; } ||
     fail "The tree in $WORK was made with other patches or build settings than this commit has. Build it again (tools/build-cef.sh local), then publish."
   GITHUB_REPOSITORY="$(cd "$REPO_DIR" && gh repo view --json nameWithOwner --jq .nameWithOwner)"
   export GH_REPO="$GITHUB_REPOSITORY"
@@ -735,7 +802,7 @@ publish() {
     origin="- Built from $GITHUB_SHA with \`tools/build-cef.sh local\` on a machine of the Magnetite maintainers, not by the workflow, so it has no attestation. Each SHA-256 is in the file next to its archive."
   fi
   {
-    echo "CEF $CEF_VERSION, the minimal distribution (${platforms#, }; macosarm64 is macOS on Apple silicon, linux64 Linux on x86_64, windows64 Windows on x86_64), built from source with the H.264, AAC and HEVC decoders that the official builds leave out."
+    echo "CEF $CEF_VERSION, the minimal distribution (${platforms#, }; macosarm64 is macOS on Apple silicon, macosx64 macOS on Intel, linux64 Linux on x86_64, linuxarm64 Linux on arm64, windows64 Windows on x86_64), built from source with the H.264, AAC and HEVC decoders that the official builds leave out."
     echo
     echo "$origin"
     for archive in $ARCHIVES; do
@@ -762,11 +829,11 @@ case "${1:-}" in
   publish-local) publish_local ;;
   release-state) release_state ;;
   publish) publish ;;
+  check) check ;;
   win-toolchain) win_toolchain ;;
   win-toolchain-unpack) win_toolchain_unpack ;;
-  win-check) win_check ;;
   *)
-    echo "usage: $0 local|publish-local|release-state|publish|win-toolchain|win-toolchain-unpack|win-check" >&2
+    echo "usage: $0 local|publish-local|release-state|publish|check|win-toolchain|win-toolchain-unpack" >&2
     exit 2
     ;;
 esac
