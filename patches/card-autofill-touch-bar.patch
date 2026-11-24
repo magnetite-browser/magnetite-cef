@@ -1,0 +1,41 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index f12e668..427613a 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -36,6 +36,15 @@ patches = [
+     # https://bugs.chromium.org/p/chromium/issues/detail?id=1420723
+     'name': 'gn_config',
+   },
++  {
++    # Magnetite: credit card suggestions in a page no longer end the program
++    # on macOS. Chrome's Touch Bar code took every browser's window for one
++    # of Chrome's own and dereferenced a native widget that CEF's Views
++    # windows do not have.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_card_autofill_touch_bar',
++  },
+   {
+     # Patches that must be applied after `gclient sync --nohooks` and before
+     # `gclient runhooks`.
+diff --git a/patch/patches/magnetite_card_autofill_touch_bar.patch b/patch/patches/magnetite_card_autofill_touch_bar.patch
+new file mode 100644
+index 0000000..ec50f0a
+--- /dev/null
++++ b/patch/patches/magnetite_card_autofill_touch_bar.patch
+@@ -0,0 +1,15 @@
++diff --git chrome/browser/ui/cocoa/touchbar/web_textfield_touch_bar_controller.mm chrome/browser/ui/cocoa/touchbar/web_textfield_touch_bar_controller.mm
++--- chrome/browser/ui/cocoa/touchbar/web_textfield_touch_bar_controller.mm
+++++ chrome/browser/ui/cocoa/touchbar/web_textfield_touch_bar_controller.mm
++@@ -26,6 +26,11 @@
++ 
++   BrowserNativeWidgetMac* native_widget = static_cast<BrowserNativeWidgetMac*>(
++       browser_view->browser_widget()->browser_native_widget());
+++  // Magnetite: a browser in a CEF Views window has CEF's native widget, not
+++  // Chrome's, so there is no Touch Bar controller to ask.
+++  if (!native_widget) {
+++    return nil;
+++  }
++   return [native_widget->GetTouchBarController() webTextfieldTouchBar];
++ }
++ 
