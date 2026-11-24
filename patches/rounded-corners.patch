@@ -1,5 +1,5 @@
 diff --git a/libcef/browser/views/window_impl.cc b/libcef/browser/views/window_impl.cc
-index 008b42056..183c62279 100644
+index 008b42056..afbbf3c6b 100644
 --- a/libcef/browser/views/window_impl.cc
 +++ b/libcef/browser/views/window_impl.cc
 @@ -21,7 +21,9 @@
@@ -25,7 +25,7 @@ index 008b42056..183c62279 100644
  #if BUILDFLAG(IS_OZONE)
  // Returns true if running on the Wayland platform.
  bool IsRunningOnWayland() {
-@@ -883,6 +891,20 @@ void CefWindowImpl::RemoveAllAccelerators() {
+@@ -883,6 +891,26 @@ void CefWindowImpl::RemoveAllAccelerators() {
  
  void CefWindowImpl::SetThemeColor(int color_id, cef_color_t color) {
    CEF_REQUIRE_VALID_RETURN_VOID();
@@ -39,6 +39,12 @@ index 008b42056..183c62279 100644
 +      layer->SetRoundedCornerRadius(
 +          gfx::RoundedCornersF(static_cast<float>(color)));
 +      layer->SetIsFastRoundedCorner(color != 0);
++      // An X11 window without a compositing manager cannot be translucent
++      // and is cut to its corners instead (CaptionlessFrameView::
++      // GetWindowMask). Setting no shape makes X11 ask for that mask again.
++      if (!IsRunningOnWayland()) {
++        widget_->SetShape(nullptr);
++      }
 +    }
 +    return;
 +  }
@@ -47,10 +53,60 @@ index 008b42056..183c62279 100644
      view_util::SetColor(root_view(), color_id, color);
    }
 diff --git a/libcef/browser/views/window_view.cc b/libcef/browser/views/window_view.cc
-index 9c030f0db..240fc5cd0 100644
+index 9c030f0db..32a7b583b 100644
 --- a/libcef/browser/views/window_view.cc
 +++ b/libcef/browser/views/window_view.cc
-@@ -654,6 +654,15 @@ void CefWindowView::CreateWidget(gfx::AcceleratedWidget parent_widget) {
+@@ -24,6 +24,7 @@
+ #include "ui/base/hit_test.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/base/mojom/ui_base_types.mojom-shared.h"
++#include "ui/compositor/layer.h"
+ #include "ui/display/screen.h"
+ #include "ui/gfx/image/image_skia.h"
+ #include "ui/views/widget/widget.h"
+@@ -239,7 +240,28 @@ class CaptionlessFrameView : public views::FrameView {
+   }
+ 
+   void GetWindowMask(const gfx::Size& size, SkPath* window_mask) override {
+-    // Nothing to do here.
++#if BUILDFLAG(IS_LINUX)
++    // Magnetite: a Window with round corners (CefWindowImpl::SetThemeColor)
++    // shows its parent outside them only if it is translucent. An X11 window
++    // is not without a compositing manager and would show its background
++    // there, so X11 cuts it to this mask instead (without anti-aliasing).
++    // X11 only: on Wayland the mask would clip what the window paints, and
++    // ShouldWindowContentsBeTransparent would ask for it again.
++    if (ui::OzonePlatform::GetPlatformNameForTest() == "wayland" ||
++        widget_->ShouldWindowContentsBeTransparent()) {
++      return;
++    }
++    const ui::Layer* layer = widget_->GetLayer();
++    const float radius = layer ? layer->rounded_corner_radii().upper_left() : 0;
++    const SkRect bounds = SkRect::MakeWH(size.width(), size.height());
++    if (radius > 0) {
++      *window_mask = SkPath::RRect(bounds, radius, radius);
++      shaped_ = true;
++    } else if (shaped_) {
++      // Given no mask, X11 keeps the window's last shape.
++      *window_mask = SkPath::Rect(bounds);
++    }
++#endif
+   }
+ 
+   void ResetWindowControls() override {
+@@ -305,6 +327,11 @@ class CaptionlessFrameView : public views::FrameView {
+ 
+   // The bounds of the client view, in this view's coordinates.
+   gfx::Rect client_view_bounds_;
++
++#if BUILDFLAG(IS_LINUX)
++  // Magnetite: whether GetWindowMask has cut this window to round corners.
++  bool shaped_ = false;
++#endif
+ };
+ 
+ BEGIN_METADATA(CaptionlessFrameView)
+@@ -654,6 +681,15 @@ void CefWindowView::CreateWidget(gfx::AcceleratedWidget parent_widget) {
  
    params.delegate->SetCanResize(can_resize);
  
