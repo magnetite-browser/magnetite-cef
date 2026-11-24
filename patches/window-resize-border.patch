@@ -1,0 +1,18 @@
+--- a/libcef/browser/views/window_view.cc
++++ b/libcef/browser/views/window_view.cc
+@@ -303,6 +303,15 @@
+ 
+  private:
+   int ResizeBorderThickness() const {
++#if BUILDFLAG(IS_LINUX)
++    // A window inside another one is placed and sized by the client, never
++    // by dragging its edges. A border would keep the outermost points from
++    // its contents, and under X11 a press there would hand the window to the
++    // window manager to resize.
++    if (widget_->parent()) {
++      return 0;
++    }
++#endif
+     return (widget_->IsMaximized() || widget_->IsFullscreen()
+                 ? 0
+                 : kResizeBorderThickness);
