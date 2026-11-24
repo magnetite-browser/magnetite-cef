@@ -1,0 +1,58 @@
+diff --git a/patch/patch.cfg b/patch/patch.cfg
+index f12e668..16c37b2 100644
+--- a/patch/patch.cfg
++++ b/patch/patch.cfg
+@@ -49,6 +49,15 @@ patches = [
+     # https://github.com/chromiumembedded/cef/issues/1617
+     'name': 'component_build',
+   },
++  {
++    # Magnetite: a window of the application is shared (getDisplayMedia,
++    # chrome.desktopCapture) through ScreenCaptureKit on macOS, which records
++    # it with its child windows, not through its widget's compositor, which
++    # left out the pages the application shows in child windows.
++    # Near the top of the list: CEF adds its own patches at the end, where a
++    # change of ours stops applying with the next CEF version.
++    'name': 'magnetite_window_share',
++  },
+   {
+     # Allow CEF to customize macOS OSCrypt Keychain item names.
+     # https://github.com/chromiumembedded/cef/issues/2692
+diff --git a/patch/patches/magnetite_window_share.patch b/patch/patches/magnetite_window_share.patch
+new file mode 100644
+index 0000000..3088d51
+--- /dev/null
++++ b/patch/patches/magnetite_window_share.patch
+@@ -0,0 +1,32 @@
++diff --git chrome/browser/media/webrtc/native_desktop_media_list.cc chrome/browser/media/webrtc/native_desktop_media_list.cc
++--- chrome/browser/media/webrtc/native_desktop_media_list.cc
+++++ chrome/browser/media/webrtc/native_desktop_media_list.cc
++@@ -42,10 +42,6 @@
++ #include "ui/snapshot/snapshot_aura.h"
++ #endif
++ 
++-#if BUILDFLAG(IS_MAC)
++-#include "components/remote_cocoa/browser/scoped_cg_window_id.h"
++-#endif
++-
++ #if BUILDFLAG(IS_WIN)
++ #include <windows.h>
++ 
++@@ -216,10 +212,13 @@
++     }
++   }
++ #elif BUILDFLAG(IS_MAC)
++-  if (!is_source_list_delegated &&
++-      remote_cocoa::ScopedCGWindowID::Get(desktop_media_id.id)) {
++-    window_id = desktop_media_id.id;
++-  }
+++  // Magnetite: a window of this application is captured by ScreenCaptureKit
+++  // like any other window, not through its widget's compositor. The
+++  // application shows its pages in child windows of their own, which that
+++  // compositor does not draw: a shared window showed none of its pages.
+++  // ScreenCaptureKit records a window with its child windows, as the
+++  // picker's thumbnail of it already shows. Like any other window it needs
+++  // the screen recording permission then.
++ #endif
++ 
++   return window_id;
