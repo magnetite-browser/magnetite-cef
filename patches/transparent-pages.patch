@@ -1,0 +1,67 @@
+--- a/libcef/browser/context.cc
++++ b/libcef/browser/context.cc
+@@ -74,6 +74,18 @@
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ bool GetColor(const cef_color_t cef_in, bool is_windowless, SkColor* sk_out) {
++#if BUILDFLAG(IS_LINUX)
++  // Magnetite: a windowed browser in a translucent window (a Window with a
++  // parent, CefWindowView::CreateWidget) may be fully transparent too. It
++  // asks with a colour whose alpha is 0 but which is not 0 itself: 0 is
++  // the unset value of CefBrowserSettings::background_color.
++  if (!is_windowless && cef_in != 0 &&
++      CefColorGetA(cef_in) == SK_AlphaTRANSPARENT) {
++    *sk_out = SK_ColorTRANSPARENT;
++    return true;
++  }
++#endif
++
+   // Windowed browser colors must be fully opaque.
+   if (!is_windowless && CefColorGetA(cef_in) != SK_AlphaOPAQUE) {
+     return false;
+--- a/libcef/browser/views/window_impl.cc
++++ b/libcef/browser/views/window_impl.cc
+@@ -27,6 +27,7 @@
+ #include "ui/views/controls/button/menu_button.h"
+ #include "ui/views/controls/menu/menu_runner.h"
+ #include "ui/views/controls/webview/webview.h"
++#include "ui/views/view_utils.h"
+ 
+ #if defined(USE_AURA)
+ #include "ui/aura/window.h"
+@@ -49,6 +50,22 @@
+ // Magnetite: SetThemeColor with this id, which no colour has, takes the
+ // radius of the Window's corners instead of a colour.
+ constexpr int kCornerRadiusId = -1;
++
++// Magnetite: SetThemeColor with this id takes the radius of the corners of
++// the pages in the Window (each views::WebView in it) instead of a colour,
++// for a page that does not fill its Window.
++constexpr int kPageCornerRadiusId = -2;
++
++// Round the page of each views::WebView in |view| and below it: its holder
++// clips the page's native view, which the View's own layer does not.
++void RoundPages(views::View* view, float radius) {
++  if (auto* web_view = views::AsViewClass<views::WebView>(view)) {
++    web_view->holder()->SetNativeViewCornerRadii(gfx::RoundedCornersF(radius));
++  }
++  for (views::View* child : view->children()) {
++    RoundPages(child, radius);
++  }
++}
+ #endif
+ 
+ #if BUILDFLAG(IS_OZONE)
+@@ -904,6 +921,12 @@
+     }
+     return;
+   }
++  if (color_id == kPageCornerRadiusId) {
++    if (root_view()) {
++      RoundPages(root_view(), static_cast<float>(color));
++    }
++    return;
++  }
+ #endif
+   if (root_view()) {
+     view_util::SetColor(root_view(), color_id, color);
