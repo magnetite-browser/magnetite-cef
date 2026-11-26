@@ -1,0 +1,69 @@
+diff --git a/libcef/browser/frame_host_impl.cc b/libcef/browser/frame_host_impl.cc
+index a08b690..5988dc8 100644
+--- a/libcef/browser/frame_host_impl.cc
++++ b/libcef/browser/frame_host_impl.cc
+@@ -17,7 +17,10 @@
+ #include "cef/libcef/common/request_impl.h"
+ #include "cef/libcef/common/string_util.h"
+ #include "cef/libcef/common/task_runner_impl.h"
++#include "chrome/browser/tab_list/tab_list_interface.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/tab_sharing/tab_sharing_infobar_delegate.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "components/infobars/content/content_infobar_manager.h"
+ #include "components/infobars/core/infobar.h"
+ #include "content/browser/renderer_host/frame_tree_node.h"
+@@ -113,6 +116,30 @@ void ShareTabInstead(content::WebContents* web_contents) {
+   }
+ }
+ 
++// Magnetite: the message a client sends to the browser process on a frame of
++// a browser (`CefFrame::SendProcessMessage` with `PID_BROWSER`) to say
++// whether the browser's tab is pinned, with one bool argument. An
++// application that keeps pinned tabs of its own tells Chromium so, and to
++// extensions the tab is pinned or not as it is in the application.
++constexpr char kSetTabPinnedMessage[] = "magnetite.set-tab-pinned";
++
++void SetTabPinned(content::WebContents* web_contents, bool pinned) {
++  tabs::TabInterface* tab =
++      tabs::TabInterface::MaybeGetFromContents(web_contents);
++  BrowserWindowInterface* window =
++      tab ? tab->GetBrowserWindowInterface() : nullptr;
++  TabListInterface* tab_list =
++      window ? TabListInterface::From(window) : nullptr;
++  if (!tab_list || tab->IsPinned() == pinned) {
++    return;
++  }
++  if (pinned) {
++    tab_list->PinTab(tab->GetHandle());
++  } else {
++    tab_list->UnpinTab(tab->GetHandle());
++  }
++}
++
+ }  // namespace
+ 
+ CefFrameHostImpl::CefFrameHostImpl(
+@@ -326,6 +353,22 @@ void CefFrameHostImpl::SendProcessMessage(
+     return;
+   }
+ 
++  if (target_process == PID_BROWSER && message && message->IsValid() &&
++      message->GetName().ToString() == kSetTabPinnedMessage) {
++    CefRefPtr<CefListValue> arguments = message->GetArgumentList();
++    const bool pinned =
++        arguments && arguments->GetSize() > 0 && arguments->GetBool(0);
++    CEF_POST_TASK(CEF_UIT,
++                  base::BindOnce(
++                      [](CefRefPtr<CefBrowserHostBase> browser, bool pinned) {
++                        if (browser && browser->GetWebContents()) {
++                          SetTabPinned(browser->GetWebContents(), pinned);
++                        }
++                      },
++                      GetBrowserHostBase(), pinned));
++    return;
++  }
++
+   DCHECK_EQ(PID_RENDERER, target_process);
+   DCHECK(message && message->IsValid());
+   if (!message || !message->IsValid()) {
