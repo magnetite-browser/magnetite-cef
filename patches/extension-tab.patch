@@ -321,10 +321,10 @@ index f12e668..3e787db 100644
      # https://codereview.chromium.org/1992243003
 diff --git a/patch/patches/magnetite_extension_tab.patch b/patch/patches/magnetite_extension_tab.patch
 new file mode 100644
-index 0000000..c9c0184
+index 0000000..3b382be
 --- /dev/null
 +++ b/patch/patches/magnetite_extension_tab.patch
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,188 @@
 +diff --git chrome/browser/extensions/api/tabs/tabs_api.cc chrome/browser/extensions/api/tabs/tabs_api.cc
 +--- chrome/browser/extensions/api/tabs/tabs_api.cc
 ++++ chrome/browser/extensions/api/tabs/tabs_api.cc
@@ -341,7 +341,7 @@ index 0000000..c9c0184
 + #if BUILDFLAG(ENABLE_EXTENSIONS)
 + #include "chrome/browser/resource_coordinator/tab_lifecycle_unit_external.h"
 + #endif
-+@@ -1131,6 +1137,85 @@ ExtensionFunction::ResponseAction WindowsCreateFunction::Run() {
++@@ -1131,6 +1137,95 @@ ExtensionFunction::ResponseAction WindowsCreateFunction::Run() {
 +     }
 +   }
 + 
@@ -353,10 +353,14 @@ index 0000000..c9c0184
 ++  // a tab from chrome.tabs.create instead, the first from the window focused
 ++  // last and each further one right after the one before, so they keep
 ++  // their order. The window handed back is the first tab's, which stays
-++  // open as the page on screen. A window that is to take an existing tab,
-++  // an empty one, an app's, one to be its creator's opener or one in a
-++  // profile other than that window's goes Chromium's way, as does one whose
-++  // first tab the application leaves to Chromium.
+++  // open as the page on screen; a further address the application opens
+++  // nothing for is left out. Tabs have no bounds or state of their own: a
+++  // minimized window's tabs open behind the page in front, as an unfocused
+++  // window's do, and the other states and bounds mean nothing for them. A
+++  // window that is to take an existing tab, an empty one, an app's, one to
+++  // be its creator's opener or one in a profile other than that window's
+++  // goes Chromium's way, as does one whose first tab the application leaves
+++  // to Chromium.
 ++  if (window_type == BrowserWindowInterface::TYPE_NORMAL && !urls_.empty() &&
 ++      !isolated_web_app_url_info_ && !set_self_as_opener_ &&
 ++      !is_locked_fullscreen && !(create_data_ && create_data_->tab_id)) {
@@ -365,8 +369,14 @@ index 0000000..c9c0184
 ++    BrowserWindowInterface* opener =
 ++        controller ? controller->GetBrowserWindowInterface() : nullptr;
 ++    if (opener && opener->GetProfile() == window_profile) {
-++      const bool focused =
-++          !create_data_ || !create_data_->focused || *create_data_->focused;
+++      // As for Chromium's own windows, a minimized one is unfocused by
+++      // default (a focused minimized one is refused above).
+++      const bool minimized =
+++          create_data_ &&
+++          create_data_->state == windows::WindowState::kMinimized;
+++      const bool focused = create_data_ && create_data_->focused
+++                               ? *create_data_->focused
+++                               : !minimized;
 ++      // The application is asked about each tab, and may close windows.
 ++      base::WeakPtr<BrowserWindowInterface> first_window;
 ++      base::WeakPtr<BrowserWindowInterface> previous = opener->GetWeakPtr();
@@ -427,7 +437,7 @@ index 0000000..c9c0184
 +   // Create a new BrowserWindow if possible.
 +   if (GetBrowserWindowCreationStatusForProfile(*window_profile) !=
 +       BrowserWindowInterface::CreationStatus::kOk) {
-+@@ -2799,6 +2884,15 @@ ExtensionFunction::ResponseAction TabsUpdateFunction::Run() {
++@@ -2799,6 +2894,15 @@ ExtensionFunction::ResponseAction TabsUpdateFunction::Run() {
 +     }
 +   }
 + 
